@@ -35,16 +35,17 @@
   --line-2:       rgba(0,0,0,.14);
   --line-strong:  rgba(0,0,0,.22);
 
-  --info:         #2563eb;
-  --info-bg:      #e8efff;
-  --success:      #157f3d;
-  --success-bg:   #e3f3e8;
-  --warning:      #a16207;
-  --warning-bg:   #fbf1d5;
-  --danger:       #b91c1c;
-  --danger-bg:    #fbe4e4;
-  --purple:       #6d28d9;
-  --purple-bg:    #ede4fb;
+  /* AJUSTE R8 B.1: paleta semántica calmada para uso prolongado. Contrastes ≥ 4.5 vs --paper. */
+  --info:         #3b6ea8;
+  --info-bg:      #eaf1f8;
+  --success:      #3d7a52;
+  --success-bg:   #e8f0ea;
+  --warning:      #8a5a1c;
+  --warning-bg:   #f6ecd9;
+  --danger:       #a14a48;
+  --danger-bg:    #f3e2e0;
+  --purple:       #6c569c;
+  --purple-bg:    #ebe4f1;
 
   --r-sm: 4px;
   --r-md: 6px;
@@ -60,6 +61,7 @@
   --select-arrow: "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path fill='none' stroke='%237a766c' stroke-width='1.4' d='M2 4l3 3 3-3'/></svg>";
 
   --sb-w: 232px;
+  --sb-w-collapsed: 60px;   /* AJUSTE R8 H: ancho de sidebar colapsada */
 
   --z-popover: 100;
   --z-drawer:  200;
@@ -80,15 +82,16 @@
   --line-2:       rgba(255,255,255,.13);
   --line-strong:  rgba(255,255,255,.22);
 
-  --info:         #5ea8e8;
+  /* AJUSTE R8 B.2: paleta semántica del tema oscuro suavizada. Los *-bg quedan igual. */
+  --info:         #7ab1de;
   --info-bg:      rgba(37,99,235,.20);
-  --success:      #56c98b;
+  --success:      #7cb893;
   --success-bg:   rgba(34,197,94,.18);
-  --warning:      #e4b561;
+  --warning:      #d7b378;
   --warning-bg:   rgba(217,119,6,.22);
-  --danger:       #f0726f;
+  --danger:       #d68d87;
   --danger-bg:    rgba(220,38,38,.26);
-  --purple:       #b29bf5;
+  --purple:       #a99bd6;
   --purple-bg:    rgba(139,92,246,.22);
 
   --shadow-1: 0 1px 0 rgba(0,0,0,.45);
@@ -145,7 +148,26 @@ hr { border: 0; border-top: .5px solid var(--line); margin: 0; }
   display: grid;
   grid-template-columns: var(--sb-w) 1fr;
   min-height: 100vh;
+  transition: grid-template-columns 180ms ease;
 }
+/* AJUSTE R8 H.2: modo colapsado de la sidebar — sólo iconos, ~60px. */
+.app.sidebar-collapsed { grid-template-columns: var(--sb-w-collapsed) 1fr; }
+.app.sidebar-collapsed .sidebar { padding: 18px 6px; }
+.app.sidebar-collapsed .brand { justify-content: center; padding: 2px; }
+.app.sidebar-collapsed .brand-text { display: none; }
+.app.sidebar-collapsed .nav-item { justify-content: center; padding: 9px 6px; position: relative; }
+.app.sidebar-collapsed .nav-item span:not(.badge):not(.badge-pend) { display: none; }
+.app.sidebar-collapsed .nav-item .badge,
+.app.sidebar-collapsed .nav-item .badge-pend {
+  position: absolute; top: 2px; right: 2px; margin-left: 0;
+  font-size: 9px; padding: 1px 4px; min-width: auto;
+}
+.app.sidebar-collapsed .sidebar-footer .session-chip,
+.app.sidebar-collapsed .sidebar-footer #recChip { display: none; }
+.app.sidebar-collapsed #themeToggle span,
+.app.sidebar-collapsed #sidebarToggle span { display: none; }
+.app.sidebar-collapsed #themeToggle,
+.app.sidebar-collapsed #sidebarToggle { justify-content: center; padding: 6px; }
 .sidebar {
   background: var(--paper-2);
   border-right: .5px solid var(--line);
@@ -450,10 +472,22 @@ hr { border: 0; border-top: .5px solid var(--line); margin: 0; }
    TABLE
    ============================================================ */
 .table-wrap {
+  /* AJUSTE R8 F.1: scroll horizontal cuando hay muchas columnas (p. ej. Inventario con
+     las 18 columnas activas). Antes era overflow:hidden y bloqueaba el scroll. */
   border: .5px solid var(--line);
   border-radius: var(--r-lg);
   background: var(--paper);
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: visible;
+  /* AJUSTE R8 F.2: fade sutil en el borde derecho cuando hay overflow, como indicador
+     de scroll disponible. background-attachment local hace que el fade siga el scroll. */
+  background:
+    linear-gradient(to right, var(--paper) 30%, transparent),
+    linear-gradient(to right, transparent, var(--paper) 70%) right,
+    var(--paper);
+  background-size: 40px 100%, 40px 100%, 100% 100%;
+  background-repeat: no-repeat;
+  background-attachment: local, local, scroll;
 }
 .table-toolbar {
   display: flex;
@@ -526,6 +560,10 @@ hr { border: 0; border-top: .5px solid var(--line); margin: 0; }
   place-items: center;
   padding: 24px;
   animation: fade-in 140ms ease-out;
+  /* AJUSTE R8 G.4: blur sutil detrás del modal para separación visual.
+     Degradación silenciosa en navegadores que no lo soportan. */
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
 }
 .backdrop.is-stacked { background: var(--backdrop-stacked); }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
@@ -543,7 +581,11 @@ hr { border: 0; border-top: .5px solid var(--line); margin: 0; }
   background: var(--paper);
   border: .5px solid var(--line-2);
   border-radius: var(--r-xl);
-  box-shadow: var(--shadow-3);
+  /* AJUSTE R8 G.2: sombra compuesta para más definición sin saturar. */
+  box-shadow:
+    0 32px 80px -16px rgba(0,0,0,.28),
+    0 12px 24px -8px rgba(0,0,0,.14),
+    0 0 0 .5px var(--line-2);
   width: 100%;
   max-width: 940px;
   max-height: 94vh;
@@ -552,15 +594,26 @@ hr { border: 0; border-top: .5px solid var(--line); margin: 0; }
   animation: slide-up 160ms ease-out;
   overflow: hidden;
 }
+:root[data-theme="dark"] .modal {
+  /* AJUSTE R8 G.2: variante para tema oscuro, más profunda pero no opaca. */
+  box-shadow:
+    0 32px 80px -16px rgba(0,0,0,.65),
+    0 12px 24px -8px rgba(0,0,0,.45),
+    0 0 0 .5px rgba(255,255,255,.06);
+}
 .modal.lg { max-width: 1080px; }
 .modal.md { max-width: 720px; }
 .modal.sm { max-width: 480px; }
 .modal-h {
+  /* AJUSTE R8 G.1: header con fondo diferenciado y borde inferior más definido
+     para crear jerarquía visual sin agregar peso. */
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 14px 18px;
-  border-bottom: .5px solid var(--line);
+  border-bottom: .5px solid var(--line-2);
+  background: var(--paper-2);
+  border-radius: var(--r-xl) var(--r-xl) 0 0;
 }
 .modal-h h3 { font-size: 14px; font-weight: 500; }
 .modal-h .sub { color: var(--ink-3); font-size: 12px; }
@@ -860,6 +913,11 @@ hr { border: 0; border-top: .5px solid var(--line); margin: 0; }
     <div class="sidebar-footer">
       <div class="session-chip" id="sessionChip"></div>
       <div id="recChip" style="margin-bottom:2px;"></div>
+      <!-- AJUSTE R8 H.3: botón para colapsar/expandir la sidebar a modo iconos -->
+      <button class="btn ghost sm" id="sidebarToggle" title="Compactar barra lateral" style="justify-content:flex-start;">
+        <i class="ti ti-layout-sidebar-left-collapse"></i>
+        <span id="sidebarToggleLabel">Compactar</span>
+      </button>
       <button class="btn ghost sm" id="themeToggle" title="Cambiar tema" style="justify-content:flex-start;">
         <i class="ti ti-moon-stars"></i>
         <span id="themeToggleLabel">Tema oscuro</span>
@@ -5498,7 +5556,9 @@ function renderNav() {
   nav.innerHTML = '';
   const main = h('div');
   NAV_ITEMS.forEach(it => {
-    const item = h('div.nav-item', { dataset: { view: it.id } }, [
+    /* AJUSTE R8 H.4: title siempre presente; aparece como tooltip al hover, útil
+       sobre todo cuando la sidebar está colapsada y se ven solo iconos. */
+    const item = h('div.nav-item', { dataset: { view: it.id }, title: it.label }, [
       h('i.ti', { class: 'ti ' + it.icon }),
       h('span', it.label),
       it.soon ? h('span.badge', 'pronto') : null,
@@ -5609,7 +5669,9 @@ VIEWS.dash = {
     root.appendChild(h('div', { style:{fontSize:'11.5px', color:'var(--ink-3)', textTransform:'uppercase', letterSpacing:'.04em', marginBottom:'8px', fontWeight:500} }, 'Estado operacional'));
     const kpis = h('div.kpi-grid', { style:{marginBottom:'18px'} });
     kpis.appendChild(kpiCard({ label: `Operativos / ${fmt.number(total)}`, value: `${fmt.number(byEst.Operativo||0)} · ${pctOper}%`, kind: pctOper >= 80 ? 'success' : pctOper >= 50 ? 'warning' : 'danger', onclick: () => Router.go('inv', { estado: 'Operativo' }) }));
-    kpis.appendChild(kpiCard({ label: 'No operativos', value: fmt.number(noOpTotal), kind: noOpTotal ? 'danger' : 'muted', onclick: () => Router.go('inv', { estado: 'NoOperativo' }) }));
+    /* AJUSTE R8 C: label engloba los 3 estados que suma noOpTotal; onclick usa el preset
+       no_operativos_todos para que el filtro coincida con el valor mostrado. */
+    kpis.appendChild(kpiCard({ label: 'Fuera de operación', value: fmt.number(noOpTotal), kind: noOpTotal ? 'danger' : 'muted', onclick: () => Router.go('inv', { estado: 'no_operativos_todos' }) }));
     kpis.appendChild(kpiCard({ label: 'Ciclos correctivos', value: fmt.number(ciclos), kind: ciclos ? 'info' : 'muted', onclick: () => Router.go('ciclos') }));
     kpis.appendChild(kpiCard({ label: 'Mis pendientes hoy', value: fmt.number(misHoy), kind: misHoy ? 'warning' : 'muted', onclick: () => { UI_PEND.filtros = { estado:'', asignado: yo || '', desde:'', hasta: new Date().toISOString().slice(0,10) }; Router.go('tareas'); } }));
     kpis.appendChild(kpiCard({ label: 'Pendientes vencidos', value: fmt.number(pendVencidos), kind: pendVencidos ? 'danger' : 'muted', onclick: () => { UI_PEND.filtros = { estado:'', asignado:'', desde:'', hasta: new Date().toISOString().slice(0,10) }; Router.go('tareas'); } }));
@@ -5891,9 +5953,10 @@ VIEWS.inv = {
       title: 'Inventario',
       desc: `${fmt.number(STATE.equipos.length)} equipos cargados${showSlots ? '' : ' · slots disponibles ocultos'}`,
       actions: [
+        /* AJUSTE R8 A.1: el toolbar del Inventario muestra solo la acción contextual.
+           Importar maestro y Backup viven en Configuración (card "Datos") y en el
+           empty state cuando no hay equipos. */
         { label: 'Exportar filtrado', icon: 'ti-file-export', onclick: () => exportarInventarioFiltrado() },
-        { label: 'Importar maestro', icon: 'ti-refresh', onclick: handleImportMaestro },
-        { label: 'Backup', icon: 'ti-database-export', onclick: exportBackup },
       ],
     });
     root.appendChild(headerEl);
@@ -6969,24 +7032,38 @@ VIEWS.entregas = {
     const mpPendientes  = Math.max(0, programadas.length - ejecutadas.length - causalizadas.length);
     const pctCumpl      = programadas.length ? Math.round(ejecutadas.length / programadas.length * 100) : null;
 
-    // Sección "Mes ${MESES[mesNum-1]}"
+    /* AJUSTE R8 E.2: KPIs de la sección "Mes" ahora son clickeables y abren un modal
+       con la lista de equipos que cuentan. mpPendientesLista se materializa para que
+       el modal coincida exacto con el número del KPI. */
+    const ejecutadasSet = new Set(ejecutadas.map(e => e.uuid));
+    const causalizadasSet = new Set(causalizadas.map(e => e.uuid));
+    const mpPendientesLista = programadas.filter(e => !ejecutadasSet.has(e.uuid) && !causalizadasSet.has(e.uuid));
+    const mesLabel = `${MESES[mesNum-1]} ${periodo.split('-')[0]}`;
     const secMes = h('div', { style:{marginBottom:'16px'} });
-    secMes.appendChild(h('h3', { style:{fontSize:'12px', textTransform:'uppercase', letterSpacing:'.05em', color:'var(--ink-3)', fontWeight:500, margin:'0 0 8px'} }, `Mes ${MESES[mesNum-1]} ${periodo.split('-')[0]}`));
+    secMes.appendChild(h('h3', { style:{fontSize:'12px', textTransform:'uppercase', letterSpacing:'.05em', color:'var(--ink-3)', fontWeight:500, margin:'0 0 8px'} }, `Mes ${mesLabel}`));
     secMes.appendChild(h('div.kpi-grid', [
       kpiCard({ label: `Con marca en grilla`, value: fmt.number(conGrilla.length), onclick: () => Router.go('pmp', { modo:'mes', mes: mesNum }) }),
-      kpiCard({ label: 'Programadas (X/R)',   value: fmt.number(programadas.length) }),
-      kpiCard({ label: 'Ejecutadas (SI)',     value: pctCumpl != null ? `${fmt.number(ejecutadas.length)} (${pctCumpl}%)` : fmt.number(ejecutadas.length), kind: pctCumpl != null ? (pctCumpl >= 80 ? 'success' : pctCumpl >= 50 ? 'warning' : 'danger') : 'muted' }),
-      kpiCard({ label: 'Causalizadas',        value: fmt.number(causalizadas.length), kind: causalizadas.length ? 'warning' : 'muted' }),
-      kpiCard({ label: 'Pendientes',          value: fmt.number(mpPendientes), kind: mpPendientes > 0 ? 'danger' : 'success' }),
+      kpiCard({ label: 'Programadas (X/R)',   value: fmt.number(programadas.length),
+        onclick: programadas.length ? () => abrirModalEquiposDelKPI(`Programadas en ${mesLabel}`, programadas) : null }),
+      kpiCard({ label: 'Ejecutadas (SI)',     value: pctCumpl != null ? `${fmt.number(ejecutadas.length)} (${pctCumpl}%)` : fmt.number(ejecutadas.length), kind: pctCumpl != null ? (pctCumpl >= 80 ? 'success' : pctCumpl >= 50 ? 'warning' : 'danger') : 'muted',
+        onclick: ejecutadas.length ? () => abrirModalEquiposDelKPI(`Ejecutadas (SI) en ${mesLabel}`, ejecutadas) : null }),
+      kpiCard({ label: 'Causalizadas',        value: fmt.number(causalizadas.length), kind: causalizadas.length ? 'warning' : 'muted',
+        onclick: causalizadas.length ? () => abrirModalEquiposDelKPI(`Causalizadas en ${mesLabel}`, causalizadas, { exportar:true }) : null }),
+      kpiCard({ label: 'Pendientes',          value: fmt.number(mpPendientes), kind: mpPendientes > 0 ? 'danger' : 'success',
+        onclick: mpPendientes ? () => abrirModalEquiposDelKPI(`MP pendientes en ${mesLabel}`, mpPendientesLista, { exportar:true }) : null }),
     ]));
     root.appendChild(secMes);
 
-    // Sección "Asignación"
+    /* AJUSTE R8 E.3: KPIs de la sección "Asignación" también clickeables. */
+    const equiposAsignados = [];
+    groups.forEach((arr, key) => { if (key !== '(sin asignar)') arr.forEach(e => equiposAsignados.push(e)); });
     const secAsig = h('div', { style:{marginBottom:'16px'} });
     secAsig.appendChild(h('h3', { style:{fontSize:'12px', textTransform:'uppercase', letterSpacing:'.05em', color:'var(--ink-3)', fontWeight:500, margin:'0 0 8px'} }, 'Asignación de responsables'));
     secAsig.appendChild(h('div.kpi-grid', [
-      kpiCard({ label: 'Técnicos activos', value: fmt.number(tecCount), kind: tecCount ? 'info' : 'muted' }),
-      kpiCard({ label: 'Equipos asignados', value: fmt.number(totalAsignados), kind: totalAsignados ? 'success' : 'muted' }),
+      kpiCard({ label: 'Técnicos activos', value: fmt.number(tecCount), kind: tecCount ? 'info' : 'muted',
+        onclick: tecCount ? () => abrirModalTecnicosDelPeriodo(periodo, tecnicos) : null }),
+      kpiCard({ label: 'Equipos asignados', value: fmt.number(totalAsignados), kind: totalAsignados ? 'success' : 'muted',
+        onclick: totalAsignados ? () => abrirModalEquiposDelKPI(`Equipos asignados en ${periodoLabel(periodo)}`, equiposAsignados) : null }),
       kpiCard({ label: 'Sin asignar', value: fmt.number(sinAsignar), kind: sinAsignar ? 'danger' : 'muted', onclick: () => Router.go('entregas', { periodo, focus: '(sin asignar)' }) }),
     ]));
     root.appendChild(secAsig);
@@ -7378,7 +7455,109 @@ async function exportarInventarioFiltrado() {
   } catch (e) { bus.emit('error', e); }
 }
 
+/* ============================================================
+   AJUSTE R8 E.1: helpers para que los KPIs de Entregas (y otras
+   vistas) abran modales con la lista de equipos que están
+   contando. La fila clickeable lleva a la ficha del equipo.
+   ============================================================ */
 
+/**
+ * Modal con la lista de equipos asociados a un KPI.
+ * @param titulo string
+ * @param equipos Array<Equipo>
+ * @param opciones { exportar?: boolean }
+ */
+function abrirModalEquiposDelKPI(titulo, equipos, opciones={}) {
+  UI.modal({
+    title: titulo,
+    sub: `${equipos.length} equipo${equipos.length === 1 ? '' : 's'}`,
+    size: 'md',
+    content: (body) => {
+      if (!equipos.length) {
+        body.appendChild(emptyState({ icon:'ti-circle-dashed', title:'Sin equipos', desc:'No hay equipos que cumplan este criterio.' }));
+        return;
+      }
+      const wrap = h('div.table-wrap');
+      const tbl = h('table.dt');
+      tbl.innerHTML = `<thead><tr><th>Inventario</th><th>Equipo</th><th>Servicio</th><th>Familia</th><th>Estado</th></tr></thead>`;
+      const tb = h('tbody');
+      equipos.slice().sort((a,b) => (a.servicio||'').localeCompare(b.servicio||'','es') || (a.nombre||'').localeCompare(b.nombre||'','es')).forEach(e => {
+        tb.appendChild(h('tr', { onclick: () => { document.querySelectorAll('#modals .backdrop .modal-h .close').forEach(c => c.click()); openFicha(e.uuid); } }, [
+          h('td.col-mono', e.inventario || '—'),
+          h('td', e.nombre || '—'),
+          h('td.truncate', e.servicio || '—'),
+          h('td.truncate', e.fam || '—'),
+          h('td', h(`span.pill.${ESTADO_PILL[e.estado]||''}`.trim(), ESTADO_LABEL[e.estado] || e.estado)),
+        ]));
+      });
+      tbl.appendChild(tb);
+      wrap.appendChild(tbl);
+      body.appendChild(wrap);
+    },
+    footer: (f, { close }) => {
+      f.appendChild(h('button.btn.ghost', { onclick: close }, 'Cerrar'));
+      if (opciones.exportar && equipos.length) {
+        f.appendChild(h('button.btn', { onclick: async () => {
+          try {
+            await ensureXLSX();
+            const headers = ['Inventario','Equipo','Servicio','Familia','Marca','Modelo','Serie','Estado'];
+            const data = [headers];
+            equipos.forEach(e => data.push([
+              e.inventario||'', e.nombre||'', e.servicio||'', e.fam||'',
+              e.marca||'', e.modelo||'', e.serie||'', ESTADO_LABEL[e.estado] || e.estado || '',
+            ]));
+            const wb = XLSX.utils.book_new();
+            const ws = XLSX.utils.aoa_to_sheet(data);
+            XLSX.utils.book_append_sheet(wb, ws, 'Equipos');
+            const slug = titulo.toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'');
+            XLSX.writeFile(wb, `${slug}_${new Date().toISOString().slice(0,10)}.xlsx`);
+            UI.toast(`Exportados ${equipos.length} equipos.`, 'success');
+          } catch (e) { bus.emit('error', e); }
+        } }, [ h('i.ti.ti-file-export'), 'Exportar a Excel' ]));
+      }
+    },
+  });
+}
+
+/**
+ * Modal con la lista de técnicos del período + count de equipos asignados.
+ * @param periodo string 'YYYY-MM'
+ * @param tecnicosArr Array<[responsable, equipos[]]>  (resultado de agruparPorTecnico)
+ */
+function abrirModalTecnicosDelPeriodo(periodo, tecnicosArr) {
+  const filtrados = tecnicosArr.filter(([k]) => k !== '(sin asignar)')
+    .sort((a,b) => b[1].length - a[1].length);
+  UI.modal({
+    title: `Técnicos activos · ${periodoLabel(periodo)}`,
+    sub: `${filtrados.length} técnico${filtrados.length === 1 ? '' : 's'}`,
+    size: 'sm',
+    content: (body) => {
+      if (!filtrados.length) {
+        body.appendChild(emptyState({ icon:'ti-users-off', title:'Sin técnicos asignados', desc:'No hay archivo de asignación cargado para este período.' }));
+        return;
+      }
+      const wrap = h('div.table-wrap');
+      const tbl = h('table.dt');
+      tbl.innerHTML = `<thead><tr><th>Técnico</th><th style="width:80px;text-align:right">Equipos</th></tr></thead>`;
+      const tb = h('tbody');
+      filtrados.forEach(([resp, equipos]) => {
+        tb.appendChild(h('tr', {
+          style:{cursor:'pointer'},
+          onclick: () => { document.querySelectorAll('#modals .backdrop .modal-h .close').forEach(c => c.click()); abrirModalEquiposDelKPI(`Equipos de ${resp} · ${periodoLabel(periodo)}`, equipos); },
+        }, [
+          h('td', resp),
+          h('td', { style:{textAlign:'right'} }, h('span.pill.info', String(equipos.length))),
+        ]));
+      });
+      tbl.appendChild(tb);
+      wrap.appendChild(tbl);
+      body.appendChild(wrap);
+    },
+    footer: (f, { close }) => {
+      f.appendChild(h('button.btn.ghost', { onclick: close }, 'Cerrar'));
+    },
+  });
+}
 
 function pendFiltrosActivos() {
   const f = UI_PEND.filtros;
@@ -8564,7 +8743,8 @@ VIEWS.config = {
     const sess = STATE.session || {};
 
     const card1 = h('div.card', { style:{ marginBottom:'14px' } }, [
-      h('div.card-h', [ h('h3','Datos'), h('span.sub', `${fmt.number(STATE.equipos.length)} equipos · ${fmt.number(STATE.pendientes.length)} tareas`) ]),
+      /* AJUSTE R8 D.1: label residual "tareas" → "pendientes" (R4 renombró la vista). */
+      h('div.card-h', [ h('h3','Datos'), h('span.sub', `${fmt.number(STATE.equipos.length)} equipos · ${fmt.number(STATE.pendientes.length)} pendientes`) ]),
       h('dl.dl', [
         h('dt','Versión app'),   h('dd', APP_VERSION),
         h('dt','Schema'),        h('dd', `v${meta.schemaVersion || '—'}`),
@@ -8864,6 +9044,39 @@ document.addEventListener('keydown', (e) => {
 /* ============================================================
    THEME
    ============================================================ */
+/* AJUSTE R8 H.1: estado y persistencia del modo colapsado de la sidebar. */
+function sidebarColapsada() {
+  try { return localStorage.getItem('pmp.v3.ui.sidebar.collapsed') === '1'; } catch { return false; }
+}
+function setSidebarColapsada(v) {
+  const app = document.getElementById('app');
+  if (!app) return;
+  if (v) app.classList.add('sidebar-collapsed');
+  else   app.classList.remove('sidebar-collapsed');
+  try { localStorage.setItem('pmp.v3.ui.sidebar.collapsed', v ? '1' : '0'); } catch {}
+  // Actualizar ícono y label del botón
+  const btn = document.getElementById('sidebarToggle');
+  if (btn) {
+    const icon = btn.querySelector('i');
+    const lbl  = document.getElementById('sidebarToggleLabel');
+    if (v) {
+      if (icon) icon.className = 'ti ti-layout-sidebar-left-expand';
+      if (lbl)  lbl.textContent = 'Expandir';
+      btn.title = 'Expandir barra lateral';
+    } else {
+      if (icon) icon.className = 'ti ti-layout-sidebar-left-collapse';
+      if (lbl)  lbl.textContent = 'Compactar';
+      btn.title = 'Compactar barra lateral';
+      // AJUSTE R8 H.6: al expandir, restaurar scrollTop para que el brand quede visible.
+      const sb = document.querySelector('.sidebar');
+      if (sb) sb.scrollTop = 0;
+    }
+  }
+}
+function aplicarSidebarColapsadaInicial() {
+  setSidebarColapsada(sidebarColapsada());
+}
+
 const Theme = {
   current() {
     return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
@@ -8909,6 +9122,10 @@ function boot() {
     Theme.syncToggle();
     REC.updateChip();
     $('#themeToggle').addEventListener('click', () => Theme.toggle());
+    /* AJUSTE R8 H: aplicar estado colapsado de sidebar antes del primer render
+       y conectar el botón. */
+    aplicarSidebarColapsadaInicial();
+    $('#sidebarToggle').addEventListener('click', () => setSidebarColapsada(!sidebarColapsada()));
     $('#openCmdk').addEventListener('click', () => CMDK.open());
     bus.on('state:change', (slice) => {
       renderSessionChip();
@@ -8978,6 +9195,9 @@ try {
     invGetPresets, ultimaMP, ultimaGestion, cantidadPendientesAbiertos, empresasSTUsadas,
     renderCalendarioPendientes, abrirModalPendienteDetalle, abrirModalPendientesDelDia,
     abrirPopoverColumnas, abrirPopoverVistas,
+    // R8
+    abrirModalEquiposDelKPI, abrirModalTecnicosDelPeriodo,
+    sidebarColapsada, setSidebarColapsada,
   };
 } catch {}
 </script>

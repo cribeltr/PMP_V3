@@ -1,5 +1,130 @@
 # Changelog
 
+## Fase 1 · Iteración R8 — Pulido visual y de jerarquía
+
+Iteración cosmética y de pequeñas afordancias. No toca el modelo del
+ciclo correctivo, la migración v34, `INV_COLUMNAS`, `invGetPresets`, los
+filtros del Inventario ni el calendario de Pendientes. Cero matches de
+`apps-script` / `google.script.run` / `HtmlService` en el HTML.
+
+### Parte A — Dedup botones del header del Inventario
+
+`VIEWS.inv` ya no muestra los botones "Importar maestro" y "Backup" en
+el `view-header.actions`: ambos viven en el sidebar y en Configuración.
+Solo queda **Exportar filtrado**, que es la acción contextual del
+Inventario. No se eliminó ninguna funcionalidad; solo deja de duplicarse
+en el header.
+
+### Parte B — Paleta calmada
+
+Tokens semánticos `--info / --success / --warning / --danger / --purple`
+movidos a una paleta hospitalaria menos saturada, en ambos modos:
+
+- Light: `--info:#3b6ea8`, `--success:#3d7a52`, `--warning:#8a5a1c`,
+  `--danger:#a14a48`, `--purple:#6c569c`.
+- Dark: `--info:#7ab1de`, `--success:#7cb893`, `--warning:#d7b378`,
+  `--danger:#d68d87`, `--purple:#a99bd6`.
+
+Mantiene el contraste WCAG AA para texto sobre `--paper` / `--paper-2`.
+No se tocó `--brand`, `--ink*` ni el resto del sistema.
+
+### Parte C — KPI "Fuera de operación" en el Dashboard
+
+El KPI antes etiquetado **"No operativos"** pasa a llamarse **"Fuera de
+operación"** (etiqueta institucional) y suma los 3 estados del lado
+"detenido": `NoOperativo + ServicioTecnico + Recepcionado`. Al click
+navega a `inv` con el filtro especial `no_operativos_todos`, que ya
+existía para el preset "Para reporte a jefatura".
+
+### Parte D — Label residual "tareas" → "pendientes"
+
+En `VIEWS.config.card-h`, el `.sub` que contaba pendientes decía
+"X equipos · Y tareas". Cambiado a "X equipos · Y pendientes" para
+alinear con la nomenclatura unificada de R4.
+
+### Parte E — KPIs de Entregas clickeables
+
+Las KPI cards de la vista Entregas dejan de ser sólo lectura:
+
+- **Técnicos activos** → modal con tabla `Técnico / Equipos`, y cada
+  fila abre un sub-modal con los equipos del técnico en el período.
+- **Total asignados / Programadas / Ejecutadas (SI) / Causalizadas /
+  MP pendientes** → modal con tabla
+  `Inventario / Equipo / Servicio / Familia / Estado` (5 columnas),
+  fila clickable abre la ficha del equipo.
+- Modales de Causalizadas y MP pendientes tienen botón **Exportar**
+  (Excel con la misma materialización que el modal).
+
+Helpers nuevos `abrirModalEquiposDelKPI(titulo, equipos, {exportar})` y
+`abrirModalTecnicosDelPeriodo(periodo, tecnicos)`. El conteo del modal
+coincide exacto con el value del KPI (la lista de MP pendientes se
+materializa como `programadas − ejecutadasSet − causalizadasSet`).
+
+### Parte F — Scroll horizontal de tablas
+
+`.table-wrap` toma `overflow-x: auto; overflow-y: visible;` más un fade
+gradient sutil al lado derecho (`background-image`) que aparece cuando
+hay overflow. Resuelve el clipping en pantallas angostas (laptop del
+servicio) sin sticky de primera columna.
+
+### Parte G — Jerarquía visual del modal
+
+- `.backdrop` añade `backdrop-filter: blur(2px)` para separar el modal
+  del fondo.
+- `.modal` toma una sombra compuesta (capa principal + halo) que se
+  amortigua en dark mode.
+- `.modal-h` toma `background: var(--paper-2)` y radios superiores
+  redondeados, para que el header del modal sea visualmente distinto
+  del cuerpo.
+
+No cambia ningún `id`, clase pública o markup interno: sólo CSS.
+
+### Parte H — Sidebar colapsable
+
+Botón nuevo `#sidebarToggle` en `.sidebar-footer` que alterna entre
+ancho completo y modo compacto (60px). Estado persistido en
+`pmp.v3.ui.sidebar.collapsed`.
+
+- En modo compacto, las `.nav-item` ocultan el label, mantienen el
+  icono centrado y muestran tooltip nativo (atributo `title`, presente
+  siempre).
+- La transición usa `transition: grid-template-columns` para evitar
+  reflows.
+- La clase `sidebar-collapsed` se aplica a `#app` antes de
+  `$('#app').hidden = false` para evitar flash en boot.
+
+No mueve la sidebar a horizontal ni introduce breakpoints
+responsive nuevos.
+
+### Verificaciones
+
+12/12 sims regresivas verdes (`sim_run`, `sim_3`, `sim_mp_ciclo`,
+`sim_views`, `sim_extras`, `sim_r2`-`sim_r7`, más nuevo `sim_r8.js`).
+`sim_r8.js` valida las 8 partes A–H: dedup de botones, tokens de
+paleta en ambos themes, KPI "Fuera de operación" con valor=3 y click
+al filtro `no_operativos_todos`, label "pendientes" en config, KPIs
+de Entregas abren modales con columnas correctas, `overflow-x: auto`
+computado en `.table-wrap`, reglas CSS `.modal-h{background:paper-2}`
+y `.backdrop{backdrop-filter:blur}`, sidebar toggle con persistencia y
+tooltips en los nav-items.
+
+Hooks de inspección expuestos en `window.__pmp`: `abrirModalEquiposDelKPI`,
+`abrirModalTecnicosDelPeriodo`, `sidebarColapsada`, `setSidebarColapsada`.
+
+### Pendiente de revisar manualmente
+
+- **Contraste de los nuevos tokens en monitores fuera de calibración**:
+  los valores son AA por contraste contra `--paper`, pero en el
+  ambulatorio hay un par de monitores antiguos donde el azul puede
+  verse plomizo. Revisar visualmente en la PC del SEC antes de cerrar.
+- **Fade gradient del table-wrap en dark mode**: el gradient usa
+  `var(--paper)` como color final, conviene verificar que no quede
+  visible cuando NO hay overflow (en pantallas grandes).
+- **Modal "Equipos del técnico" en stack**: al abrir el sub-modal
+  desde "Técnicos activos", el backdrop de fondo queda con
+  `is-stacked`. Verificar que el blur compuesto no se vuelva pesado
+  en hardware viejo del servicio.
+
 ## Fase 1 · Iteración R7 — Inventario operativo + Calendario de Pendientes
 
 Cierra los 4 gaps de la R6 sin tocar el modelo del ciclo correctivo,
