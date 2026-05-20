@@ -5658,50 +5658,222 @@ async function exportHistorialCompleto() {
 }
 VIEWS.agenda = {
   title: 'Agenda',
-  render(root) {
-    root.appendChild(viewHeader({
-      title: 'Agenda · contactos por servicio',
-      desc: 'Datos de supervisor, encargado de equipos y jefe del CR de cada servicio clínico.',
-    }));
+  render(root, params={}) {
     const servicios = EQ.servicios();
     if (!servicios.length) {
+      root.appendChild(viewHeader({ title: 'Agenda · contactos por servicio', desc: 'Sin servicios cargados.' }));
       root.appendChild(emptyState({ icon:'ti-address-book', title:'Sin servicios', desc:'Cargá el inventario maestro primero.' }));
       return;
     }
-    const grid = h('div', { style:{display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(280px,1fr))', gap:'10px'} });
-    servicios.forEach(s => grid.appendChild(renderContactoCard(s)));
+
+    // Estadísticas
+    const totalContactos = servicios.reduce((s, sv) => {
+      const c = getContacto(sv);
+      return s + CONTACTO_TIPOS.reduce((n, t) => {
+        const p = c[t.key] || {};
+        return n + (p.nombre || p.apellido || p.correo || p.celular || p.anexo ? 1 : 0);
+      }, 0);
+    }, 0);
+    const conAlgo = servicios.filter(sv => {
+      const c = getContacto(sv);
+      return CONTACTO_TIPOS.some(t => {
+        const p = c[t.key] || {};
+        return p.nombre || p.apellido || p.correo || p.celular || p.anexo;
+      });
+    }).length;
+
+    root.appendChild(viewHeader({
+      title: 'Agenda · contactos por servicio',
+      desc: `${conAlgo} de ${servicios.length} servicios con al menos un contacto · ${totalContactos} personas registradas`,
+    }));
+
+    // Controles
+    const search = h('div.search', { style:{flex:1} }, [
+      h('i.ti.ti-search'),
+      h('input', { type:'text', placeholder:'Buscar servicio o persona (nombre, apellido, correo)…', value: params.q || '' }),
+    ]);
+    let filtro = params.filtro || 'todos';   // 'todos' | 'con' | 'sin'
+    let orden  = params.orden  || 'sin-primero';
+
+    function chip(label, value, state) {
+      return h(`button.btn.sm ${filtro===value ? 'primary' : 'ghost'}`.trim(), {
+        onclick: () => { filtro = value; render(); },
+      }, label);
+    }
+    const filtros = h('div', { style:{display:'flex', gap:'4px'} }, [
+      chip('Todos','todos'),
+      chip('Sin contactos','sin'),
+      chip('Con contactos','con'),
+    ]);
+    const ordenSel = selectCtl([
+      { value:'sin-primero', label:'Sin contactos primero' },
+      { value:'az',          label:'A–Z' },
+      { value:'equipos',     label:'Más equipos primero' },
+    ], orden, { onchange: (e) => { orden = e.target.value; render(); } });
+
+    const controls = h('div', { style:{display:'flex', gap:'10px', alignItems:'center', marginBottom:'14px', flexWrap:'wrap'} }, [
+      search, filtros, ordenSel,
+    ]);
+    root.appendChild(controls);
+
+    const meta = h('div.table-meta', { style:{borderRadius:'6px', border:'.5px solid var(--line)', marginBottom:'10px'} });
+    root.appendChild(meta);
+    const grid = h('div', { style:{display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(340px,1fr))', gap:'10px'} });
     root.appendChild(grid);
+
+    function evaluaServicio(sv) {
+      const c = getContacto(sv);
+      const filled = CONTACTO_TIPOS.filter(t => {
+        const p = c[t.key] || {};
+        return p.nombre || p.apellido || p.correo || p.celular || p.anexo;
+      }).length;
+      return { c, filled };
+    }
+
+    function matchSearch(sv, q) {
+      if (!q) return true;
+      const n = normalize(q);
+      if (normalize(sv).includes(n)) return true;
+      const c = getContacto(sv);
+      return CONTACTO_TIPOS.some(t => {
+        const p = c[t.key] || {};
+        return [p.nombre, p.apellido, p.correo].some(v => v && normalize(v).includes(n));
+      });
+    }
+
+    function render() {
+      const q = search.querySelector('input').value;
+      let list = servicios.filter(sv => matchSearch(sv, q));
+      list = list.filter(sv => {
+        const { filled } = evaluaServicio(sv);
+        if (filtro === 'con') return filled > 0;
+        if (filtro === 'sin') return filled === 0;
+        return true;
+      });
+      const eqCount = sv => STATE.equipos.filter(e => e.servicio === sv).length;
+      list.sort((a,b) => {
+        if (orden === 'az')      return a.localeCompare(b,'es');
+        if (orden === 'equipos') return eqCount(b) - eqCount(a);
+        const fa = evaluaServicio(a).filled, fb = evaluaServicio(b).filled;
+        if (fa !== fb) return fa - fb;          // sin contactos primero
+        return a.localeCompare(b,'es');
+      });
+
+      meta.textContent = `${list.length} servicios coinciden con los filtros`;
+      grid.innerHTML = '';
+      if (!list.length) {
+        grid.appendChild(h('div', { style:{padding:'20px', color:'var(--ink-3)', fontSize:'12.5px', textAlign:'center'} }, 'Sin coincidencias.'));
+        return;
+      }
+      list.forEach(sv => grid.appendChild(renderContactoCard(sv)));
+    }
+
+    // Actualiza al tipear / cambiar orden / re-renders por estado
+    search.querySelector('input').addEventListener('input', render);
+    ordenSel.addEventListener('change', () => { orden = ordenSel.value; render(); });
+
+    render();
   },
 };
 
 function renderContactoCard(servicio) {
   const c = getContacto(servicio);
   const equiposCount = STATE.equipos.filter(e => e.servicio === servicio).length;
-  const filled = CONTACTO_TIPOS.filter(t => {
+
+  const card = h('div.card');
+
+  // Header
+  card.appendChild(h('div', { style:{display:'flex', alignItems:'center', gap:'8px', marginBottom:'10px'} }, [
+    h('div', { style:{flex:1, fontWeight:500, fontSize:'13px'} }, servicio),
+    h('span.pill.muted', `${equiposCount}`),
+    h('button.btn.icon.ghost', {
+      title:'Editar todos los contactos',
+      onclick: () => abrirDrawerContacto(servicio),
+    }, [ h('i.ti.ti-pencil') ]),
+  ]));
+
+  // Mini-fila por cada tipo de contacto
+  CONTACTO_TIPOS.forEach(t => {
     const p = c[t.key] || {};
-    return p.nombre || p.apellido || p.correo || p.celular || p.anexo;
-  }).length;
-  const card = h('div.card', { style:{cursor:'pointer'}, onclick: () => abrirDrawerContacto(servicio) }, [
-    h('div', { style:{display:'flex', alignItems:'center', gap:'8px', marginBottom:'6px'} }, [
-      h('div', { style:{flex:1, fontWeight:500, fontSize:'13px'} }, servicio),
-      h('span.pill.muted', `${equiposCount}`),
-    ]),
-    h('div', { style:{color:'var(--ink-3)', fontSize:'11.5px'} }, [
-      filled
-        ? `${filled} de 3 contactos cargados`
-        : 'Sin contactos cargados',
-    ]),
-    h('div', { style:{display:'flex', flexDirection:'column', gap:'2px', marginTop:'10px', fontSize:'11.5px'} },
-      CONTACTO_TIPOS.map(t => {
-        const p = c[t.key] || {};
-        const nombre = [p.nombre, p.apellido].filter(Boolean).join(' ');
-        return h('div', { style:{display:'flex', gap:'6px'} }, [
-          h('span', { style:{color:'var(--ink-3)', width:'90px', flexShrink:0} }, t.label + ':'),
-          h('span', { style:{color: nombre?'var(--ink-2)':'var(--ink-4)'} }, nombre || '—'),
-        ]);
-      })),
-  ]);
+    const lleno = p.nombre || p.apellido || p.correo || p.celular || p.anexo;
+    if (lleno) {
+      const nombre = [p.nombre, p.apellido].filter(Boolean).join(' ') || '(sin nombre)';
+      card.appendChild(h('div', {
+        style:{display:'flex', alignItems:'baseline', gap:'8px', padding:'6px 0', borderTop:'.5px solid var(--line)', fontSize:'12px'},
+      }, [
+        h('span', { style:{color:'var(--ink-3)', width:'80px', flexShrink:0} }, t.label),
+        h('div', { style:{flex:1, minWidth:0} }, [
+          h('div', { style:{color:'var(--ink)', fontWeight:500} }, nombre),
+          h('div', { style:{color:'var(--ink-3)', fontSize:'11px', display:'flex', gap:'10px', flexWrap:'wrap', marginTop:'2px'} }, [
+            p.correo  ? h('a', { href:`mailto:${p.correo}`, style:{color:'var(--info)', textDecoration:'none'} }, [ h('i.ti.ti-mail', { style:{fontSize:'12px', marginRight:'3px'} }), p.correo ]) : null,
+            p.celular ? h('a', { href:`tel:${p.celular}`,    style:{color:'var(--info)', textDecoration:'none'} }, [ h('i.ti.ti-phone',{ style:{fontSize:'12px', marginRight:'3px'} }), p.celular ]) : null,
+            p.anexo   ? h('span', [ h('i.ti.ti-router', { style:{fontSize:'12px', marginRight:'3px'} }), 'Anexo ', p.anexo ]) : null,
+          ].filter(Boolean)),
+        ]),
+        h('button.btn.icon.ghost', {
+          title:'Editar', style:{padding:'2px'},
+          onclick: () => abrirQuickContacto(servicio, t.key),
+        }, [ h('i.ti.ti-edit', { style:{fontSize:'13px'} }) ]),
+      ]));
+    } else {
+      card.appendChild(h('div', {
+        style:{display:'flex', alignItems:'center', gap:'8px', padding:'6px 0', borderTop:'.5px solid var(--line)', fontSize:'12px'},
+      }, [
+        h('span', { style:{color:'var(--ink-3)', width:'80px', flexShrink:0} }, t.label),
+        h('button.btn.sm.ghost', {
+          style:{flex:1, justifyContent:'flex-start'},
+          onclick: () => abrirQuickContacto(servicio, t.key),
+        }, [ h('i.ti.ti-plus'), `Agregar ${t.label.toLowerCase()}` ]),
+      ]));
+    }
+  });
+
   return card;
+}
+
+function abrirQuickContacto(servicio, tipoKey) {
+  const c = getContacto(servicio);
+  const tipo = CONTACTO_TIPOS.find(t => t.key === tipoKey);
+  const draft = Object.assign({ nombre:'', apellido:'', correo:'', anexo:'', celular:'' }, c[tipoKey] || {});
+  const yaCargado = !!(draft.nombre || draft.apellido || draft.correo || draft.celular || draft.anexo);
+
+  UI.modal({
+    title: `${yaCargado?'Editar':'Agregar'} ${tipo.label.toLowerCase()}`,
+    sub: servicio,
+    size: 'sm',
+    content: (body) => {
+      body.appendChild(row('1fr 1fr', [
+        field('Nombre',   inputCtl({ value: draft.nombre,   autofocus:true, oninput:(e)=> draft.nombre = e.target.value })),
+        field('Apellido', inputCtl({ value: draft.apellido, oninput:(e)=> draft.apellido = e.target.value })),
+      ]));
+      body.appendChild(field('Correo', inputCtl({ type:'email', value: draft.correo, oninput:(e)=> draft.correo = e.target.value })));
+      body.appendChild(row('1fr 1fr', [
+        field('Celular', inputCtl({ value: draft.celular, oninput:(e)=> draft.celular = e.target.value })),
+        field('Anexo',   inputCtl({ value: draft.anexo,   oninput:(e)=> draft.anexo = e.target.value })),
+      ]));
+    },
+    footer: (f, { close }) => {
+      f.appendChild(h('button.btn.ghost', { onclick: close }, 'Cancelar'));
+      if (yaCargado) {
+        f.appendChild(h('button.btn.danger', { onclick: async () => {
+          const ok = await UI.dialog({ title:`Borrar ${tipo.label.toLowerCase()}`, message: `¿Borrar este contacto de ${servicio}?`, confirmText:'Borrar', variant:'danger' });
+          if (!ok) return;
+          const updated = Object.assign({}, c);
+          updated[tipoKey] = { nombre:'', apellido:'', correo:'', anexo:'', celular:'' };
+          setContacto(servicio, updated);
+          UI.toast('Contacto borrado.', 'warning');
+          close(); Router.go('agenda');
+        } }, [ h('i.ti.ti-trash'), 'Borrar' ]));
+      }
+      f.appendChild(h('button.btn.primary', { onclick: () => {
+        const updated = Object.assign({}, c);
+        updated[tipoKey] = draft;
+        setContacto(servicio, updated);
+        UI.toast(`${tipo.label} guardado.`, 'success');
+        close(); Router.go('agenda');
+      }}, [ h('i.ti.ti-device-floppy'), 'Guardar' ]));
+    },
+  });
 }
 
 function abrirDrawerContacto(servicio) {
