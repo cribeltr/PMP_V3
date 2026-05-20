@@ -1,5 +1,124 @@
 # Changelog
 
+## Fase 1 · Iteración R10 — Formalización del fix de scroll horizontal + auditoría de tablas
+
+Iteración correctiva sobre R9. Incorpora un nuevo parche del PM
+(comentado `/* AJUSTE R9.1 ... */`) que cierra de verdad el problema
+del scroll horizontal del Inventario: ni R8 F.1 (overflow-x:auto del
+wrap) ni R8.1 (white-space:nowrap en celdas) bastaban porque
+`<table>` sin `width` declarado se comprime por el navegador hasta
+caber en su contenedor.
+
+### Causa raíz que R8 y R9 no detectaron
+
+El `.view` está capeado a `max-width: 1400px`. La `<table>` por
+default toma el algoritmo `auto` del navegador, que **comprime las
+columnas** para que la tabla quepa exactamente en el ancho del
+contenedor. Con `nowrap` cada celda se mantiene en 1 línea, pero el
+algoritmo de tabla redistribuye anchos: textos como "FRECUENC..." se
+recortan visualmente dentro de la celda (que tiene `overflow:hidden`
+implícito por la cascada de `.truncate` o por anchos compartidos)
+sin disparar overflow a nivel de `.table-wrap`. El wrap "ve" una
+tabla que cabe → nunca activa `overflow-x: auto`.
+
+### Parche R9.1 (Parte A — formalizado en R10)
+
+```css
+.dt {
+  font-size: 12.5px;
+  /* AJUSTE R9.1: width:max-content fuerza ancho natural; min-width:100%
+     sigue llenando el wrap cuando hay pocas columnas. */
+  width: max-content;
+  min-width: 100%;
+}
+```
+
+- `width: max-content` rompe el algoritmo de compresión: la tabla
+  toma el ancho intrínseco de su contenido (suma de los anchos de
+  todas las celdas con `nowrap`).
+- `min-width: 100%` evita que tablas chicas queden flotando con
+  espacio en blanco a la derecha en pantallas anchas.
+- Combinación: si el contenido cabe, llena el wrap; si no cabe,
+  desborda y dispara el scroll del wrap.
+
+Verificaciones R10 Parte A:
+1. `.dt { width: max-content; min-width: 100% }` presente con
+   comentario `/* AJUSTE R9.1 ... */`. ✓
+2. `.dt tbody td { white-space: nowrap }` (parche R8.1) sigue presente
+   con su comentario. ✓
+3. Clases de escape `.dt tbody td.wrap` (white-space:normal) y
+   `.dt tbody td.wrap-2` (white-space:normal + max-width:280px)
+   definidas. ✓
+4. Uso de `.wrap-2` en celdas largas: `h('td.wrap-2', { title: row.obs },
+   row.obs)` en Historial MP (línea ~6535) y `h('td.wrap-2', detalle)`
+   en Pendientes ignorados (línea ~8855). ✓
+
+### Parte B — Auditoría de las 15 tablas `.dt`
+
+El prompt mencionaba 10 conocidas; el grep `h('table.dt')` devuelve
+15. Mapeo completo y comportamiento esperado con el parche R9.1
+activo:
+
+| # | Ubicación (línea aprox.) | Columnas | Comportamiento con R9.1 |
+|---|---|---|---|
+| 1 | Modal diff "Equipos nuevos del maestro" (3934) | 6 | Llena wrap; scroll si serie/inv largos |
+| 2 | Modal diff "Equipos ausentes" (3967) | 6 | Llena wrap; sin scroll esperado |
+| 3 | Modal diff "Cambios de campo" (4010) | 4 | Llena wrap |
+| 4 | Modal diff "Cambios de grilla" (4058) | 4 | Llena wrap |
+| 5 | VIEWS.dash "últimas mantenciones" (5881) | 5 | Llena wrap |
+| 6 | **VIEWS.inv tabla principal (6098)** | 18 configurables | **Scroll horizontal al activar muchas columnas** ← caso objetivo del parche |
+| 7 | Ficha · Historial MP (6523) | 6 (Observación con `.wrap-2`) | Llena wrap; Observación hace wrap a 280px |
+| 8 | renderMes (calendario PMP) (6787) | 8 | Llena wrap o scroll según servicio largo |
+| 9 | renderAnio (grilla 12 meses) (6824) | 14 (servicio + equipo + 12 meses) | Llena wrap; scroll si muchos servicios largos |
+| 10 | VIEWS.ciclos (lista global) (6927) | 7 | Llena wrap |
+| 11 | VIEWS.entregas tabla de equipos del período (7133) | 6 | Llena wrap |
+| 12 | Modal "Filas sin match" (7184) | 3 (Serie/Inv/Responsable) | Llena wrap |
+| 13 | Modal "Equipos del KPI" (7500) | 5 | Llena wrap |
+| 14 | Modal "Técnicos del período" (7559) | 2 (Técnico/Equipos) | Llena wrap |
+| 15 | Config · Pendientes ignorados (8840) | 5 (Detalle con `.wrap-2`) | Llena wrap; Detalle hace wrap a 280px |
+
+Todas heredan automáticamente del selector base `.dt` — no hay
+overrides locales de `width` en ninguna tabla específica. Verificado
+con `sim_r10.js`: jsdom retorna `width: max-content` y `min-width:
+100%` en el computed style de cualquier `<table class="dt">`.
+
+No se detectaron tablas con comportamiento inesperado tras el parche.
+Tablas chicas (2-5 columnas) llenan el wrap como antes; la única que
+realmente activa el scroll horizontal es la del Inventario (cuando se
+activan 12+ columnas).
+
+### Verificaciones
+
+14/14 sims regresivas verdes (suite completa `sim_run`, `sim_3`,
+`sim_mp_ciclo`, `sim_views`, `sim_extras`, `sim_r2`-`sim_r9` más
+nuevo `sim_r10.js`).
+
+`sim_r10.js` valida:
+- A.1: regex sobre el bloque `.dt { ... }` confirma `width:max-content`
+  + `min-width:100%` + comentario `AJUSTE R9.1`.
+- A.2: regex sobre `.dt tbody td { ... }` confirma `white-space:nowrap`
+  + comentario `AJUSTE R8.1`; clases `.wrap` y `.wrap-2 (max-width:280px)`
+  definidas.
+- A.3: 2 apariciones de `h('td.wrap-2', ...)`, ambas en contextos
+  específicos (`row.obs` y `detalle`).
+- B: 15 tablas `.dt` en el archivo. Solo 1 regla con `width:` apuntando
+  a un selector `.dt*` (la base, intencional). Computed style en jsdom:
+  `width: max-content`, `min-width: 100%`.
+
+Sin regresiones en las 13 sims previas.
+
+### Pendiente de revisar manualmente
+
+- **Contraste de tokens R8 B en la PC del SEC** (heredado de R8, sigue
+  pendiente hasta el smoke visual del usuario en monitor real).
+- **renderAnio con muchos servicios largos**: la grilla de 14 columnas
+  podría volverse muy ancha en monitores 1366x768. Validar visualmente
+  con el dataset real (966 equipos) que el scroll horizontal no obliga
+  al usuario a scrollear lateralmente para llegar a diciembre.
+- **C.1 botón "Volver al inicio"** (heredado de R9): si el scroll
+  horizontal del Inventario con 18 columnas molesta en uso real, en R11
+  implementarlo con un wrapper flex correcto.
+
 ## Fase 1 · Iteración R9 — Cierre de pendientes R8 + auditoría tablas
 
 Iteración correctiva sobre R8. Parte de un parche del PM (comentado

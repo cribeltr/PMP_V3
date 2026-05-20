@@ -503,6 +503,13 @@ hr { border: 0; border-top: .5px solid var(--line); margin: 0; }
 }
 .dt {
   font-size: 12.5px;
+  /* AJUSTE R9.1: width:max-content fuerza a la tabla a tomar su ancho natural
+     (sin que el navegador la comprima al ancho del .view, que está capeado
+     a 1400px). Combinado con min-width:100% sigue llenando el wrap cuando
+     hay pocas columnas. Sin esto, el overflow-x:auto del .table-wrap nunca
+     se disparaba porque la tabla siempre cabía (comprimida). */
+  width: max-content;
+  min-width: 100%;
 }
 .dt thead th {
   text-align: left;
