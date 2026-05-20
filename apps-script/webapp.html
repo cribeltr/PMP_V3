@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="es" data-theme="dark">
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PMP · SEC · HHHA Temuco</title>
+<script>
+  (function () {
+    try {
+      var t = localStorage.getItem('pmp.v4.ui.theme');
+      if (t !== 'dark' && t !== 'light') t = 'dark';
+      document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {}
+  })();
+</script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tabler-icons/3.34.1/tabler-icons.min.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&display=swap">
+
+<?!= include('webapp_css'); ?>
+
+</head>
+<body>
+
+<div id="app" class="app" hidden>
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">P</div>
+      <div class="brand-text">
+        <strong>PMP · SEC</strong>
+        <span>HHHA Temuco</span>
+      </div>
+    </div>
+    <nav class="nav" id="nav"></nav>
+    <div class="sidebar-footer">
+      <div class="session-chip" id="sessionChip"></div>
+      <button class="btn ghost sm" id="themeToggle" style="justify-content:flex-start;">
+        <i class="ti ti-moon-stars"></i>
+        <span id="themeToggleLabel">Tema oscuro</span>
+      </button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <h1 id="topbarTitle">Dashboard</h1>
+      <span class="sep">·</span>
+      <span class="breadcrumb" id="topbarSub"></span>
+      <div class="grow"></div>
+      <span id="syncStatus" style="font-size:11.5px;color:var(--ink-3);"></span>
+    </header>
+    <section class="view" id="view"></section>
+  </main>
+</div>
+
+<div id="bootScreen" style="display:grid;place-items:center;min-height:100vh;color:var(--ink-3);font-size:13px;">
+  <div style="text-align:center">
+    <div style="font-size:24px;font-weight:500;color:var(--ink);margin-bottom:6px;">PMP · SEC</div>
+    <div id="bootMsg">Conectando con el Sheet…</div>
+  </div>
+</div>
+
+<div id="toasts" class="toast-wrap"></div>
+<div id="modals"></div>
+<input type="file" id="hiddenFile" style="display:none">
+
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js" defer></script>
+
+<?!= include('webapp_js'); ?>
+
+</body>
+</html>

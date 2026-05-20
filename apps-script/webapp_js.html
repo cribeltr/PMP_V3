@@ -1,0 +1,746 @@
+<script>
+'use strict';
+
+/* ============================================================
+   F2 · IT.1 — Web App cliente. Bridge async a google.script.run.
+   Vistas activas: Dashboard, Inventario, Configuración.
+   Próximas iteraciones agregan: PMP, Ciclos, Entregas, Tareas,
+   Reportes, Agenda y REC.
+   ============================================================ */
+
+const APP_VERSION = '4.0.0-f2-it1';
+
+const MESES = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+const ESTADOS = ['Operativo','NoOperativo','ServicioTecnico','FueraDeServicio','DeBaja','Slot'];
+const ESTADO_LABEL = { Operativo:'Operativo', NoOperativo:'No operativo', ServicioTecnico:'En servicio técnico', FueraDeServicio:'Fuera de servicio', DeBaja:'De baja', Slot:'Slot' };
+const ESTADO_PILL  = { Operativo:'success', NoOperativo:'danger', ServicioTecnico:'warning', FueraDeServicio:'muted', DeBaja:'muted', Slot:'muted' };
+const FRECUENCIAS  = ['Mensual','Trimestral','Semestral','Anual'];
+
+const NAV_ITEMS = [
+  { id:'dash',     label:'Dashboard',  icon:'ti-layout-dashboard' },
+  { id:'inv',      label:'Inventario', icon:'ti-stethoscope' },
+  { id:'pmp',      label:'PMP anual',  icon:'ti-calendar-month',     soon:true },
+  { id:'ciclos',   label:'Ciclos correctivos', icon:'ti-tools',      soon:true },
+  { id:'entregas', label:'Entregas',   icon:'ti-clipboard-list',     soon:true },
+  { id:'tareas',   label:'Tareas',     icon:'ti-checks',             soon:true },
+  { id:'reportes', label:'Reportes',   icon:'ti-report',             soon:true },
+  { id:'agenda',   label:'Agenda',     icon:'ti-address-book',       soon:true },
+  { id:'config',   label:'Configuración', icon:'ti-settings' },
+];
+
+/* ============================================================
+   UTIL
+   ============================================================ */
+const $  = (sel, root=document) => root.querySelector(sel);
+const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
+
+function h(tag, attrs={}, children=[]) {
+  let id = null, cls = [];
+  const parts = tag.match(/[.#][^.#]+/g) || [];
+  tag = tag.replace(/[.#][^.#]+/g, '');
+  parts.forEach(p => p[0]==='#' ? (id = p.slice(1)) : cls.push(p.slice(1)));
+  const el = document.createElement(tag);
+  if (id) el.id = id;
+  if (cls.length) el.className = cls.join(' ');
+  if (attrs && typeof attrs === 'object' && !Array.isArray(attrs) && !(attrs instanceof Node)) {
+    for (const [k, v] of Object.entries(attrs)) {
+      if (v == null || v === false) continue;
+      if (k === 'class') el.className = (el.className + ' ' + v).trim();
+      else if (k === 'style' && typeof v === 'object') Object.assign(el.style, v);
+      else if (k === 'dataset') Object.assign(el.dataset, v);
+      else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2).toLowerCase(), v);
+      else if (k === 'html') el.innerHTML = v;
+      else if (k in el && typeof el[k] !== 'function') { try { el[k] = v; } catch { el.setAttribute(k, v); } }
+      else el.setAttribute(k, v);
+    }
+  } else if (attrs != null) { children = attrs; }
+  const append = (c) => {
+    if (c == null || c === false) return;
+    if (Array.isArray(c)) c.forEach(append);
+    else if (c instanceof Node) el.appendChild(c);
+    else el.appendChild(document.createTextNode(String(c)));
+  };
+  append(children);
+  return el;
+}
+
+function normalize(s) { return String(s ?? '').normalize('NFD').replace(/\p{Diacritic}/gu,'').toLowerCase().trim(); }
+function uuid() {
+  if (crypto?.randomUUID) return crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random()*16|0, v = c==='x' ? r : (r&0x3|0x8);
+    return v.toString(16);
+  });
+}
+
+const fmt = {
+  date(d) {
+    if (!d) return '—';
+    const dt = (d instanceof Date) ? d : new Date(d);
+    if (isNaN(dt)) return String(d);
+    return dt.toLocaleDateString('es-CL');
+  },
+  datetime(d) {
+    if (!d) return '—';
+    const dt = (d instanceof Date) ? d : new Date(d);
+    if (isNaN(dt)) return String(d);
+    return dt.toLocaleString('es-CL');
+  },
+  rel(d) {
+    if (!d) return '—';
+    const dt = (d instanceof Date) ? d : new Date(d);
+    if (isNaN(dt)) return String(d);
+    const days = Math.floor((Date.now() - dt) / 86400000);
+    if (days < 1) return 'hoy';
+    if (days < 2) return 'ayer';
+    if (days < 30) return `hace ${days} días`;
+    if (days < 365) return `hace ${Math.floor(days/30)} meses`;
+    return `hace ${Math.floor(days/365)} años`;
+  },
+  number(n) { if (n == null || n === '') return '—'; return Number(n).toLocaleString('es-CL'); },
+};
+
+/* ============================================================
+   API · bridge a google.script.run con Promise
+   ============================================================ */
+const API = (() => {
+  let pending = 0;
+  function updateSync() {
+    const el = document.getElementById('syncStatus');
+    if (!el) return;
+    if (pending > 0) {
+      el.textContent = `Sincronizando ${pending}…`;
+      el.style.color = 'var(--warning)';
+    } else {
+      el.textContent = 'Conectado';
+      el.style.color = 'var(--success)';
+      setTimeout(() => { if (pending === 0) el.textContent = ''; }, 2000);
+    }
+  }
+  function call(fn, ...args) {
+    pending++; updateSync();
+    return new Promise((resolve, reject) => {
+      google.script.run
+        .withSuccessHandler(r => { pending--; updateSync(); resolve(r); })
+        .withFailureHandler(e => { pending--; updateSync(); reject(e); })
+        [fn](...args);
+    });
+  }
+  return { call };
+})();
+
+/* ============================================================
+   STATE · cache en memoria + carga inicial
+   ============================================================ */
+const STATE = {
+  bootstrap: null,
+  equipos: [],
+  pendientes: [],
+  contactos: {},
+  asignaciones: {},
+  view: 'dash',
+  viewParams: {},
+};
+
+const bus = {
+  _l: new Map(),
+  on(evt, fn) { if (!this._l.has(evt)) this._l.set(evt, new Set()); this._l.get(evt).add(fn); },
+  emit(evt, payload) { this._l.get(evt)?.forEach(fn => { try { fn(payload); } catch (e) { console.error(e); } }); },
+};
+bus.on('error', (err) => {
+  const msg = (err && err.message) || String(err);
+  UI.toast(msg, 'danger', { duration: 6000 });
+  API.call('apiLog', 'error', msg, err && err.stack || '').catch(()=>{});
+});
+
+/* ============================================================
+   UI · toast / modal / dialog (subset)
+   ============================================================ */
+const UI = (() => {
+  const modalsRoot = () => document.getElementById('modals');
+  const stack = [];
+  function lockBody(b) { document.body.style.overflow = b ? 'hidden' : ''; }
+
+  function modal({ title, sub, size='', content, footer, critical=false, onClose }) {
+    const backdrop = h('div.backdrop');
+    if (stack.length) backdrop.classList.add('is-stacked');
+    const m = h(`div.modal.${size}`.trim());
+    const head = h('div.modal-h', [
+      h('div', [ h('h3', title || ''), sub ? h('div.sub', sub) : null ]),
+      h('button.btn.icon.ghost.close', [ h('i.ti.ti-x') ]),
+    ]);
+    const body = h('div.modal-body');
+    if (typeof content === 'function') content(body, { close });
+    else if (content instanceof Node) body.appendChild(content);
+    m.appendChild(head); m.appendChild(body);
+    if (footer) {
+      const f = h('div.modal-f');
+      if (typeof footer === 'function') footer(f, { close }); else f.appendChild(footer);
+      m.appendChild(f);
+    }
+    backdrop.appendChild(m);
+    modalsRoot().appendChild(backdrop);
+    lockBody(true);
+    function close(reason) {
+      if (!backdrop.isConnected) return;
+      backdrop.remove();
+      const i = stack.indexOf(api); if (i >= 0) stack.splice(i, 1);
+      if (!stack.length) lockBody(false);
+      try { onClose?.(reason); } catch (e) {}
+    }
+    head.querySelector('.close').addEventListener('click', () => close('close-btn'));
+    if (!critical) backdrop.addEventListener('mousedown', e => { if (e.target === backdrop) close('backdrop'); });
+    function key(e) { if (e.key === 'Escape' && stack[stack.length-1] === api) close('esc'); }
+    document.addEventListener('keydown', key);
+    const _close = close;
+    close = r => { document.removeEventListener('keydown', key); _close(r); };
+    const api = { close, root: m, body };
+    stack.push(api);
+    return api;
+  }
+
+  function dialog({ title, message, confirmText='Confirmar', cancelText='Cancelar', variant='', onConfirm }) {
+    return new Promise(resolve => {
+      modal({
+        title, size:'sm', critical:true,
+        content: (b) => b.appendChild(h('p', { style:{margin:0,color:'var(--ink-2)',fontSize:'13px'} }, message)),
+        footer: (f, { close }) => {
+          f.appendChild(h('button.btn.ghost', { onclick: () => { close(); resolve(false); } }, cancelText));
+          f.appendChild(h(`button.btn.primary ${variant==='danger'?'danger':''}`.trim(), { onclick: async () => { try { await onConfirm?.(); } catch {} close(); resolve(true); } }, confirmText));
+        },
+      });
+    });
+  }
+
+  function toast(msg, kind='', opts={}) {
+    const t = h(`div.toast ${kind}`.trim(), [
+      h('i.ti', { class: 'ti ' + (kind==='success'?'ti-check': kind==='warning'?'ti-alert-triangle': kind==='danger'?'ti-alert-octagon': 'ti-info-circle') }),
+      h('span', msg),
+    ]);
+    document.getElementById('toasts').appendChild(t);
+    const to = setTimeout(() => t.remove(), opts.duration ?? 4000);
+    t.addEventListener('click', () => { clearTimeout(to); t.remove(); });
+    return t;
+  }
+
+  return { modal, dialog, toast };
+})();
+
+/* ============================================================
+   THEME
+   ============================================================ */
+const Theme = {
+  current() { return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark'; },
+  set(t) {
+    document.documentElement.setAttribute('data-theme', t);
+    try { localStorage.setItem('pmp.v4.ui.theme', t); } catch {}
+    this.sync();
+  },
+  toggle() { this.set(this.current() === 'dark' ? 'light' : 'dark'); },
+  sync() {
+    const btn = document.getElementById('themeToggle');
+    if (!btn) return;
+    const isDark = this.current() === 'dark';
+    btn.querySelector('i').className = 'ti ' + (isDark ? 'ti-moon-stars' : 'ti-sun');
+    document.getElementById('themeToggleLabel').textContent = isDark ? 'Tema oscuro' : 'Tema claro';
+  },
+};
+
+/* ============================================================
+   IMPORT MAESTRO · parse client + envío server
+   ============================================================ */
+async function ensureXLSX() {
+  let tries = 0;
+  while (typeof XLSX === 'undefined' && tries < 40) { await new Promise(r => setTimeout(r, 100)); tries++; }
+  if (typeof XLSX === 'undefined') throw new Error('No se pudo cargar SheetJS.');
+}
+
+function pickFile(accept='.xlsx,.xlsm') {
+  return new Promise(resolve => {
+    const inp = document.getElementById('hiddenFile');
+    inp.value = ''; inp.accept = accept;
+    const onChange = () => { inp.removeEventListener('change', onChange); resolve(inp.files[0] || null); };
+    inp.addEventListener('change', onChange, { once: true });
+    inp.click();
+  });
+}
+
+function detectHeaderRow(aoa) {
+  for (let i = 0; i < Math.min(aoa.length, 20); i++) {
+    const row = aoa[i].map(c => normalize(c));
+    if (row.some(c => c.includes('fam')) && row.some(c => c.includes('equipo') || c.includes('nombre')) && row.some(c => c.includes('serie'))) return i;
+  }
+  return -1;
+}
+
+function indexHeaders(headerRow) {
+  const idx = {};
+  headerRow.forEach((raw, i) => {
+    const c = normalize(raw);
+    if (!c) return;
+    if (c === 'fam' || c.startsWith('familia')) idx.fam = i;
+    else if (c === 'id') idx.id = i;
+    else if (c.includes('carpeta')) idx.carpeta = i;
+    else if (c.includes('inventario') && !idx.inventario) idx.inventario = i;
+    else if (c === 'equipo' || c === 'nombre' || c === 'nombre equipo') idx.nombre = i;
+    else if (c === 'servicio') idx.servicio = i;
+    else if (c === 'unidad') idx.unidad = i;
+    else if (c.includes('ubicacion')) idx.ubicacion = i;
+    else if (c.includes('procedencia')) idx.procedencia = i;
+    else if (c === 'marca') idx.marca = i;
+    else if (c === 'modelo') idx.modelo = i;
+    else if (c.includes('serie')) idx.serie = i;
+    else if (c.includes('ano') || c.includes('año') || c.includes('instalacion')) idx.anio = i;
+    else if (c.includes('vida')) idx.vidaUtil = i;
+    else if (c.includes('clasificacion')) idx.clasificacion = i;
+    else if (c === 'enu' || c.includes('baja')) idx.enu = i;
+    else if (c.includes('observacion')) idx.observacion = i;
+    else if (c.includes('frecuencia')) idx.frecuencia = i;
+    else if (c.includes('responsable')) idx.responsableMaster = i;
+    else {
+      const long = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+      for (let k = 0; k < 12; k++) {
+        if (c === normalize(MESES[k]) || c === long[k] || c.startsWith(long[k])) { idx[`mes_${k+1}`] = i; break; }
+      }
+    }
+  });
+  return idx;
+}
+
+function normalizeFreq(raw) {
+  const s = normalize(raw); if (!s) return '';
+  if (s.startsWith('men')) return 'Mensual';
+  if (s.startsWith('tri') || s.includes('trimest')) return 'Trimestral';
+  if (s.startsWith('sem') || s.includes('semest')) return 'Semestral';
+  if (s.startsWith('an')  || s.includes('anu'))    return 'Anual';
+  return raw || '';
+}
+
+function normalizeGrillaCell(raw) {
+  const s = normalize(raw); if (!s) return null;
+  if (s === 'x') return 'X'; if (s === 'r') return 'R';
+  if (s === 'ra') return 'RA'; if (s === 'pm') return 'PM';
+  return null;
+}
+
+function rowToEquipoDraft(r, idx) {
+  const cell = k => idx[k] != null ? String(r[idx[k]] ?? '').trim() : '';
+  const grilla = {};
+  for (let m = 1; m <= 12; m++) grilla[m] = normalizeGrillaCell(r[idx[`mes_${m}`]]);
+  return {
+    fam: cell('fam'), famOriginal: cell('fam'), id: cell('id'),
+    carpeta: cell('carpeta') ? Number(cell('carpeta')) || cell('carpeta') : null,
+    inventario: cell('inventario'), nombre: cell('nombre'),
+    servicio: cell('servicio'), unidad: cell('unidad'),
+    ubicacion: cell('ubicacion'), procedencia: cell('procedencia'),
+    marca: cell('marca'), modelo: cell('modelo'), serie: cell('serie'),
+    anio: cell('anio'), vidaUtil: cell('vidaUtil'),
+    clasificacion: cell('clasificacion'), enu: cell('enu'),
+    observacion: cell('observacion'), frecuencia: normalizeFreq(cell('frecuencia')),
+    responsableMaster: cell('responsableMaster'),
+    estado: 'Operativo', estadoDesde: null, esSlot: false,
+    grilla,
+  };
+}
+
+function matchKey(e) {
+  const s = normalize(e.serie), i = normalize(e.inventario);
+  if (s && s !== 'n/a') return `s:${s}`;
+  if (i && i !== 'n/a') return `i:${i}`;
+  return null;
+}
+
+function mergeEquipoInPlace(prev, draft) {
+  ['fam','famOriginal','id','carpeta','inventario','nombre','servicio','unidad','ubicacion',
+   'procedencia','marca','modelo','anio','vidaUtil','clasificacion','enu','observacion',
+   'frecuencia','responsableMaster']
+    .forEach(k => { if (draft[k]) prev[k] = draft[k]; });
+  for (let m = 1; m <= 12; m++) {
+    const incoming = draft.grilla[m]; const current = prev.grilla?.[m] ?? null;
+    if (!incoming) continue;
+    if (incoming === 'X' && (current === 'R' || current === 'RA' || current === 'PM')) continue;
+    prev.grilla[m] = incoming;
+  }
+}
+
+async function handleImportMaestro() {
+  try {
+    const file = await pickFile('.xlsx,.xlsm');
+    if (!file) return;
+    UI.toast(`Procesando ${file.name}…`, 'info', { duration: 2500 });
+    await ensureXLSX();
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array' });
+    const sheetName = wb.SheetNames.find(n => /^pmp_?20\d{2}$/i.test(n)) || wb.SheetNames[0];
+    const ws = wb.Sheets[sheetName];
+    const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
+    const hr = detectHeaderRow(aoa);
+    if (hr < 0) throw new Error('No se encontró fila de encabezados (Fam / Equipo / Serie).');
+    const idx = indexHeaders(aoa[hr]);
+    const rows = aoa.slice(hr + 1).filter(r => r.some(c => String(c).trim()));
+
+    const previas = new Map(STATE.equipos.map(e => [matchKey(e), e]));
+    const merged = [];
+    const seen = new Set();
+    let nuevos = 0, actualizados = 0;
+
+    for (const r of rows) {
+      const draft = rowToEquipoDraft(r, idx);
+      if (!draft.nombre && !draft.inventario && !draft.serie) continue;
+      const key = matchKey(draft);
+      const prev = key ? previas.get(key) : null;
+      if (prev) {
+        seen.add(prev.uuid);
+        mergeEquipoInPlace(prev, draft);
+        merged.push(prev);
+        actualizados++;
+      } else {
+        const nuevo = Object.assign({ uuid: uuid() }, draft);
+        merged.push(nuevo);
+        nuevos++;
+      }
+    }
+    STATE.equipos.forEach(e => { if (!seen.has(e.uuid) && !merged.includes(e)) merged.push(e); });
+    STATE.equipos = merged;
+
+    UI.toast(`Guardando ${merged.length} equipos en el Sheet…`, 'info');
+    await API.call('apiSaveEquiposBulk', STATE.equipos);
+    UI.toast(`Hoja "${sheetName}": ${nuevos} nuevos · ${actualizados} actualizados.`, 'success', { duration: 6000 });
+    Router.go(STATE.view, STATE.viewParams);
+  } catch (e) { bus.emit('error', e); }
+}
+
+/* ============================================================
+   QUERIES locales
+   ============================================================ */
+const EQ = {
+  byUuid(u) { return STATE.equipos.find(e => e.uuid === u); },
+  servicios() { return Array.from(new Set(STATE.equipos.map(e => e.servicio).filter(Boolean))).sort((a,b)=>a.localeCompare(b,'es')); },
+  familias()  { return Array.from(new Set(STATE.equipos.map(e => e.fam).filter(Boolean))).sort((a,b)=>a.localeCompare(b,'es')); },
+  countByEstado() {
+    const c = {}; ESTADOS.forEach(s => c[s] = 0);
+    STATE.equipos.forEach(e => { c[e.estado] = (c[e.estado]||0) + 1; });
+    return c;
+  },
+  search(q, filters={}) {
+    const n = normalize(q);
+    return STATE.equipos.filter(e => {
+      if (filters.servicio && e.servicio !== filters.servicio) return false;
+      if (filters.familia  && e.fam !== filters.familia) return false;
+      if (filters.estado   && e.estado !== filters.estado) return false;
+      if (!n) return true;
+      return normalize(`${e.nombre} ${e.marca} ${e.modelo} ${e.serie} ${e.inventario} ${e.servicio} ${e.fam}`).includes(n);
+    });
+  },
+};
+
+/* ============================================================
+   ROUTER + VIEWS
+   ============================================================ */
+const VIEWS = {};
+const Router = {
+  go(viewId, params={}) {
+    STATE.view = viewId; STATE.viewParams = params;
+    renderNav();
+    const view = VIEWS[viewId] || VIEWS.dash;
+    const root = document.getElementById('view');
+    root.innerHTML = '';
+    document.getElementById('topbarTitle').textContent = view.title || '';
+    document.getElementById('topbarSub').textContent = view.sub || '';
+    try { view.render(root, params); } catch (e) { console.error(e); bus.emit('error', e); }
+  },
+};
+
+function renderNav() {
+  const nav = document.getElementById('nav');
+  nav.innerHTML = '';
+  NAV_ITEMS.forEach(it => {
+    const item = h('div.nav-item', [
+      h('i.ti', { class: 'ti ' + it.icon }),
+      h('span', it.label),
+      it.soon ? h('span.badge', 'pronto') : null,
+    ]);
+    if (STATE.view === it.id) item.classList.add('active');
+    item.addEventListener('click', () => Router.go(it.id));
+    nav.appendChild(item);
+  });
+}
+
+function renderSessionChip() {
+  const b = STATE.bootstrap;
+  if (!b) return;
+  const lines = [
+    `Sheet: ${b.sheetName}`,
+    `App v${b.appVersion}`,
+    `Schema v${b.schemaVersion}`,
+    b.user ? b.user : '',
+  ].filter(Boolean);
+  document.getElementById('sessionChip').innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+}
+
+function viewHeader({ title, desc, actions=[] }) {
+  return h('div.view-header', [
+    h('div', [ h('h2', title), desc ? h('p', desc) : null ]),
+    h('div.actions', actions.map(a => h(`button.btn ${a.primary?'primary':''}`.trim(), { onclick: a.onclick }, [
+      a.icon ? h('i.ti', { class: 'ti ' + a.icon }) : null, a.label,
+    ]))),
+  ]);
+}
+
+function emptyState({ icon, title, desc, actions=[] }) {
+  return h('div.card', { style:{padding:0} }, [
+    h('div.empty', [
+      h('i.ti', { class: 'ti ' + (icon||'ti-info-circle') }),
+      h('h4', title), h('p', desc || ''),
+      h('div.actions', actions.map(a => h(`button.btn ${a.primary?'primary':''}`.trim(), { onclick: a.onclick }, [
+        a.icon ? h('i.ti', { class: 'ti ' + a.icon }) : null, a.label,
+      ]))),
+    ]),
+  ]);
+}
+
+function kpiCard({ label, value, kind='', onclick }) {
+  return h(`div.kpi ${kind}`.trim(), { onclick }, [
+    h('span.label', label), h('span.value', value ?? '—'),
+  ]);
+}
+
+/* ============================================================
+   VIEW · Dashboard
+   ============================================================ */
+VIEWS.dash = {
+  title: 'Dashboard',
+  render(root) {
+    const total = STATE.equipos.length;
+    const by = EQ.countByEstado();
+    root.appendChild(viewHeader({
+      title: 'Dashboard',
+      desc: total === 0
+        ? 'Sin equipos cargados. Importá el maestro Excel para empezar.'
+        : `${fmt.number(total)} equipos en el Sheet`,
+      actions: [
+        { label:'Importar maestro', icon:'ti-file-spreadsheet', onclick: handleImportMaestro, primary: total === 0 },
+        { label:'Refrescar', icon:'ti-refresh', onclick: async () => { await bootstrap(); Router.go('dash'); } },
+      ],
+    }));
+    if (total === 0) {
+      root.appendChild(emptyState({
+        icon:'ti-stethoscope', title:'Sin inventario',
+        desc:'Cargá un Excel maestro para empezar. La hoja Equipos del Sheet se llenará automáticamente.',
+        actions:[{ label:'Importar maestro', icon:'ti-file-spreadsheet', primary:true, onclick: handleImportMaestro }],
+      }));
+      return;
+    }
+    const kpis = h('div.kpi-grid');
+    kpis.appendChild(kpiCard({ label:'Equipos totales', value: fmt.number(total), onclick: () => Router.go('inv') }));
+    kpis.appendChild(kpiCard({ label:'Operativos', value: fmt.number(by.Operativo), kind:'success', onclick: () => Router.go('inv', { estado:'Operativo' }) }));
+    kpis.appendChild(kpiCard({ label:'No operativos', value: fmt.number(by.NoOperativo), kind:'danger', onclick: () => Router.go('inv', { estado:'NoOperativo' }) }));
+    kpis.appendChild(kpiCard({ label:'En servicio téc.', value: fmt.number(by.ServicioTecnico), kind:'warning', onclick: () => Router.go('inv', { estado:'ServicioTecnico' }) }));
+    kpis.appendChild(kpiCard({ label:'En garantía', value: fmt.number(STATE.equipos.filter(e => e.enGarantia).length), kind:'purple' }));
+    kpis.appendChild(kpiCard({ label:'Servicios', value: fmt.number(EQ.servicios().length) }));
+    root.appendChild(kpis);
+  },
+};
+
+/* ============================================================
+   VIEW · Inventario
+   ============================================================ */
+VIEWS.inv = {
+  title: 'Inventario',
+  render(root, params) {
+    const filters = Object.assign({ q:'', servicio:'', familia:'', estado:'' }, params || {});
+    root.appendChild(viewHeader({
+      title:'Inventario',
+      desc:`${fmt.number(STATE.equipos.length)} equipos en el Sheet`,
+      actions:[{ label:'Importar maestro', icon:'ti-refresh', onclick: handleImportMaestro }],
+    }));
+
+    if (STATE.equipos.length === 0) {
+      root.appendChild(emptyState({ icon:'ti-stethoscope', title:'Sin inventario', desc:'Importá el maestro primero.' }));
+      return;
+    }
+
+    const search = h('div.search', [
+      h('i.ti.ti-search'),
+      h('input', { type:'text', placeholder:'Buscar por nombre, serie, inventario, marca…', value: filters.q }),
+    ]);
+    function selectFilter(label, items, value='') {
+      const w = h('div');
+      const s = h('select.select');
+      s.appendChild(h('option', { value:'' }, label));
+      items.forEach(it => s.appendChild(h('option', { value: typeof it === 'string' ? it : it.value }, typeof it === 'string' ? it : it.label)));
+      if (value) s.value = value;
+      w.appendChild(s);
+      return w;
+    }
+    const selServ = selectFilter('Servicio', EQ.servicios(), filters.servicio);
+    const selFam  = selectFilter('Familia',  EQ.familias(),  filters.familia);
+    const selEst  = selectFilter('Estado',   ESTADOS.map(s => ({ value:s, label:ESTADO_LABEL[s] })), filters.estado);
+
+    const toolbar = h('div.table-toolbar', [
+      search,
+      h('div.right', [ selServ, selFam, selEst,
+        h('button.btn.ghost.sm', { onclick: () => Router.go('inv', {}) }, [ h('i.ti.ti-x'), 'Limpiar' ]),
+      ]),
+    ]);
+    const meta = h('div.table-meta');
+    const tbl = h('table.dt');
+    tbl.innerHTML = `<thead><tr>
+      <th>Servicio</th><th>Equipo</th><th>Carpeta</th><th>Inventario</th><th>Serie</th><th>Marca / Modelo</th><th>Frec.</th><th>Estado</th>
+    </tr></thead>`;
+    const tb = h('tbody');
+    tbl.appendChild(tb);
+
+    const wrap = h('div.table-wrap', [ toolbar, meta, tbl ]);
+    root.appendChild(wrap);
+
+    let current = [];
+    let rendered = 0;
+    const PAGE = 80;
+
+    function apply() {
+      const f = {
+        servicio: selServ.querySelector('select').value,
+        familia:  selFam.querySelector('select').value,
+        estado:   selEst.querySelector('select').value,
+      };
+      const q = search.querySelector('input').value;
+      current = EQ.search(q, f);
+      current.sort((a,b) => (a.servicio||'').localeCompare(b.servicio||'','es') || (a.nombre||'').localeCompare(b.nombre||'','es'));
+      tb.innerHTML = ''; rendered = 0;
+      meta.textContent = `${fmt.number(current.length)} equipos coinciden`;
+      more();
+    }
+    function more() {
+      current.slice(rendered, rendered + PAGE).forEach(e => tb.appendChild(rowForEquipo(e)));
+      rendered += PAGE;
+    }
+    search.querySelector('input').addEventListener('input', apply);
+    [selServ, selFam, selEst].forEach(s => s.querySelector('select').addEventListener('change', apply));
+    apply();
+
+    // Scroll-based pagination
+    wrap.addEventListener('scroll', () => {
+      if (rendered >= current.length) return;
+      if (wrap.scrollTop + wrap.clientHeight > tbl.offsetHeight - 200) more();
+    });
+  },
+};
+
+function rowForEquipo(e) {
+  const pill = h(`span.pill.${ESTADO_PILL[e.estado]||''}`.trim(), [ h('span.dot'), ESTADO_LABEL[e.estado] || e.estado ]);
+  return h('tr', [
+    h('td.truncate', e.servicio || '—'),
+    h('td', [ h('div', e.nombre || '—'), h('div', { style:{color:'var(--ink-3)', fontSize:'11.5px'} }, e.fam || '') ]),
+    h('td.col-mono', e.carpeta != null && e.carpeta !== '' ? String(e.carpeta) : '—'),
+    h('td.col-mono', e.inventario || '—'),
+    h('td.col-mono', e.serie || '—'),
+    h('td.truncate', `${e.marca || ''} ${e.modelo ? '· ' + e.modelo : ''}`.trim() || '—'),
+    h('td', e.frecuencia ? h('span.pill', e.frecuencia) : '—'),
+    h('td', pill),
+  ]);
+}
+
+/* ============================================================
+   VIEW · Configuración
+   ============================================================ */
+VIEWS.config = {
+  title: 'Configuración',
+  render(root) {
+    const b = STATE.bootstrap || {};
+    root.appendChild(viewHeader({ title:'Configuración', desc:'Conexión al Sheet maestro y mantenimiento.' }));
+
+    const card1 = h('div.card', { style:{marginBottom:'14px'} }, [
+      h('div.card-h', [ h('h3','Sheet maestro'), h('span.sub', b.sheetName || '—') ]),
+      h('dl.dl', [
+        h('dt','ID'), h('dd', { style:{fontFamily:'monospace', fontSize:'11.5px'} }, b.sheetId || '—'),
+        h('dt','URL'), h('dd', b.sheetUrl ? h('a', { href: b.sheetUrl, target:'_blank', style:{color:'var(--info)'} }, 'Abrir en Sheets ↗') : '—'),
+        h('dt','App'), h('dd', `v${b.appVersion || '—'}`),
+        h('dt','Schema'), h('dd', `v${b.schemaVersion || '—'}`),
+        h('dt','Usuario'), h('dd', b.user || '—'),
+      ]),
+    ]);
+    root.appendChild(card1);
+
+    const card2 = h('div.card', { style:{marginBottom:'14px'} }, [
+      h('div.card-h', [ h('h3','Estado de las hojas'), h('span.sub', 'Conteo actual de cada entidad') ]),
+      h('div.kpi-grid', [
+        kpiCard({ label:'Equipos',      value: fmt.number(b.counts?.equipos ?? 0) }),
+        kpiCard({ label:'Historial MP', value: fmt.number(b.counts?.historial ?? 0) }),
+        kpiCard({ label:'Eventos',      value: fmt.number(b.counts?.eventos ?? 0) }),
+        kpiCard({ label:'Ciclos',       value: fmt.number(b.counts?.ciclos ?? 0) }),
+        kpiCard({ label:'Pendientes',   value: fmt.number(b.counts?.pendientes ?? 0) }),
+        kpiCard({ label:'Contactos',    value: fmt.number(b.counts?.contactos ?? 0) }),
+        kpiCard({ label:'Asignaciones', value: fmt.number(b.counts?.asignaciones ?? 0) }),
+      ]),
+      h('div', { style:{marginTop:'12px', display:'flex', gap:'8px', flexWrap:'wrap'} }, [
+        h('button.btn', { onclick: async () => { await bootstrap(); Router.go('config'); UI.toast('Estado refrescado.', 'success'); } }, [ h('i.ti.ti-refresh'), 'Refrescar' ]),
+        h('button.btn', { onclick: handleImportMaestro }, [ h('i.ti.ti-file-spreadsheet'), 'Importar maestro' ]),
+      ]),
+    ]);
+    root.appendChild(card2);
+
+    const card3 = h('div.card', [
+      h('div.card-h', [ h('h3','Iteración'), h('span.sub','F2.It.1 · foundation') ]),
+      h('p', { style:{color:'var(--ink-3)', fontSize:'12.5px', margin:0} },
+        'Esta iteración entrega la base del proyecto Apps Script: bootstrap del esquema, conexión al Sheet, importación del maestro y vista de Inventario.'),
+      h('p', { style:{color:'var(--ink-3)', fontSize:'12.5px', margin:'8px 0 0'} },
+        'Próximas iteraciones agregan PMP, ciclos correctivos, asignación mensual, reportes y anexos.'),
+    ]);
+    root.appendChild(card3);
+  },
+};
+
+/* Vistas pendientes */
+function soonView(title, msg) {
+  return { title, render(root) {
+    root.appendChild(viewHeader({ title, desc:'Vista en construcción' }));
+    root.appendChild(emptyState({ icon:'ti-tools', title:'Disponible en próxima iteración', desc: msg }));
+  } };
+}
+VIEWS.pmp      = soonView('PMP anual', 'Llega en F2.It.2.');
+VIEWS.ciclos   = soonView('Ciclos correctivos', 'Llega en F2.It.3.');
+VIEWS.entregas = soonView('Entregas', 'Llega en F2.It.4.');
+VIEWS.tareas   = soonView('Tareas', 'Llega en F2.It.5.');
+VIEWS.reportes = soonView('Reportes', 'Llega en F2.It.5.');
+VIEWS.agenda   = soonView('Agenda', 'Llega en F2.It.6.');
+
+/* ============================================================
+   BOOT
+   ============================================================ */
+async function bootstrap() {
+  document.getElementById('bootMsg').textContent = 'Cargando estado…';
+  const b = await API.call('apiBootstrap');
+  STATE.bootstrap = b;
+  document.getElementById('bootMsg').textContent = 'Cargando equipos…';
+  const equipos = await API.call('apiListEquipos');
+  STATE.equipos = equipos;
+  renderSessionChip();
+}
+
+async function boot() {
+  try {
+    await bootstrap();
+    Theme.sync();
+    document.getElementById('themeToggle').addEventListener('click', () => Theme.toggle());
+    document.getElementById('bootScreen').remove();
+    document.getElementById('app').hidden = false;
+    Router.go(STATE.equipos.length ? 'inv' : 'dash');
+  } catch (e) {
+    console.error(e);
+    document.getElementById('bootMsg').innerHTML =
+      '<div style="color:var(--danger);max-width:480px;text-align:left;">' +
+      '<strong>Error de arranque:</strong><br>' +
+      (e && e.message ? e.message : String(e)) +
+      '<br><br><small>Verificá que el Sheet esté correctamente bound y que la Web App esté implementada.</small>' +
+      '</div>';
+  }
+}
+
+window.addEventListener('unhandledrejection', e => {
+  console.error(e.reason);
+  bus.emit('error', e.reason || new Error('Error inesperado'));
+});
+
+document.addEventListener('DOMContentLoaded', boot);
+</script>

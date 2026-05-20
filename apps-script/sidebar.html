@@ -1,0 +1,75 @@
+<!doctype html>
+<html>
+<head>
+<base target="_top">
+<style>
+body { font: 13px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1f1d18; margin: 0; padding: 14px; background: #faf9f5; }
+h1 { font-size: 14px; margin: 0 0 4px; }
+p  { color: #555; font-size: 12px; margin: 0 0 12px; }
+.stat { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: .5px solid rgba(0,0,0,.08); }
+.stat span:last-child { font-variant-numeric: tabular-nums; }
+.btn { display: block; width: 100%; padding: 8px 10px; margin: 6px 0; background: #1f1d18; color: #faf9f5; border: 0; border-radius: 6px; cursor: pointer; font-size: 12.5px; font-weight: 500; }
+.btn.ghost { background: transparent; color: #1f1d18; border: .5px solid rgba(0,0,0,.18); }
+.muted { color: #888; font-size: 11px; margin-top: 8px; }
+.spin { color: #888; font-style: italic; }
+.ok { color: #157f3d; }
+.err { color: #b91c1c; }
+</style>
+</head>
+<body>
+  <h1>PMP · SEC</h1>
+  <p>Utilitario rápido. La interfaz completa está en el Web App.</p>
+
+  <div id="status" class="spin">Cargando estado…</div>
+  <div id="stats" style="margin: 12px 0;"></div>
+
+  <button class="btn"       onclick="abrirWebapp()">Abrir aplicación completa ↗</button>
+  <button class="btn ghost" onclick="ensureSchema()">Crear / verificar hojas</button>
+  <button class="btn ghost" onclick="refresh()">Refrescar estado</button>
+
+  <div class="muted" id="meta"></div>
+
+<script>
+function call(fn, ...args) {
+  return new Promise((resolve, reject) => {
+    google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[fn](...args);
+  });
+}
+
+async function refresh() {
+  document.getElementById('status').textContent = 'Cargando…';
+  document.getElementById('status').className = 'spin';
+  try {
+    const r = await call('apiBootstrap');
+    document.getElementById('status').textContent = `Conectado a "${r.sheetName}"`;
+    document.getElementById('status').className = 'ok';
+    document.getElementById('stats').innerHTML = `
+      <div class="stat"><span>Equipos</span><span>${r.counts.equipos}</span></div>
+      <div class="stat"><span>MP registradas</span><span>${r.counts.historial}</span></div>
+      <div class="stat"><span>Ciclos</span><span>${r.counts.ciclos}</span></div>
+      <div class="stat"><span>Pendientes</span><span>${r.counts.pendientes}</span></div>
+      <div class="stat"><span>Asignaciones</span><span>${r.counts.asignaciones}</span></div>
+    `;
+    document.getElementById('meta').textContent = `App ${r.appVersion} · Schema v${r.schemaVersion} · ${r.user || '—'}`;
+  } catch (e) {
+    document.getElementById('status').textContent = 'Error: ' + (e.message || e);
+    document.getElementById('status').className = 'err';
+  }
+}
+
+async function ensureSchema() {
+  try { await call('ensureSchema'); refresh(); } catch (e) { alert('Error: ' + e.message); }
+}
+
+async function abrirWebapp() {
+  try {
+    const url = await call('apiGetWebappUrl');
+    if (url) window.open(url, '_blank');
+    else alert('Aún no se ha desplegado el Web App. En el editor de Apps Script: Implementar → Nueva implementación → Aplicación web.');
+  } catch (e) { alert(e.message || e); }
+}
+
+refresh();
+</script>
+</body>
+</html>

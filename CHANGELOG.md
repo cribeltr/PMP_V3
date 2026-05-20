@@ -1,6 +1,29 @@
 # Changelog
 
-## It.7.1 — Diferencias del maestro como pendiente
+## Fase 2 · F2.It.1 — Foundation Apps Script
+
+Arranca la versión Google Apps Script + Sheets del sistema. Vive en
+`apps-script/` y no afecta a `pmp.html` (Fase 1).
+
+- `Code.gs`: backend con bootstrap automático del esquema (hojas
+  `Meta`, `Equipos`, `Historial_MP`, `Eventos`, `Ciclos`,
+  `Pendientes`, `Contactos`, `Asignaciones`, `Logs_Errores` con
+  headers fijos), menú custom en el Spreadsheet (`PMP · SEC`),
+  `doGet` que sirve la Web App, y API expuesta vía
+  `google.script.run` (bootstrap, list/save Equipos / Historial /
+  Eventos / Ciclos / Pendientes / Contactos / Asignaciones, log).
+- `webapp.html` + `webapp_css.html` + `webapp_js.html`: Web App con
+  el mismo design system de la Fase 1, bridge async al servidor,
+  indicador de sincronización en el topbar, vistas Dashboard +
+  Inventario + Configuración funcionales. Las demás vistas marcadas
+  como "pronto" hasta próximas iteraciones.
+- `sidebar.html`: utilitario que se abre desde el menú del Sheet con
+  resumen de conteos y acceso rápido al Web App.
+- `appsscript.json`: manifest con scopes mínimos
+  (Spreadsheets, Drive, container UI, ScriptApp, userinfo.email).
+- `README.md`: guía de despliegue paso a paso.
+
+## Fase 1 · It.7.1 — Diferencias del maestro como pendiente
 
 - Al importar el maestro, el sistema captura un **diff completo**
   contra el estado actual: equipos nuevos, equipos ausentes, cambios
