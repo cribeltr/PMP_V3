@@ -2352,6 +2352,429 @@ function sugerirTecnicos() {
 }
 
 /* ============================================================
+   EXPORT · reporte multi-hoja
+   ============================================================ */
+async function exportReporteGeneral() {
+  await ensureXLSX();
+  const wb = XLSX.utils.book_new();
+  const now = new Date();
+  const anio = now.getFullYear();
+  const mes  = now.getMonth() + 1;
+
+  // === Resumen ===
+  const byEst = EQ.countByEstado();
+  const garan = EQ.garantiasActivas().length;
+  const programadas = STATE.equipos.filter(e => e.grilla?.[mes] === 'X' || e.grilla?.[mes] === 'R').length;
+  const ejecutadas  = STATE.equipos.filter(e => (e.historial||[]).some(h => h.mes === mes && h.resultado === 'SI')).length;
+  const ciclosAb    = EQ.ciclosAbiertos().length;
+  const pendientes  = STATE.pendientes.filter(p => p.estado !== 'Cerrado').length;
+
+  const resumen = [
+    ['PMP — Reporte general'],
+    ['Fecha de emisión', fmt.datetime(now)],
+    ['Equipos totales', STATE.equipos.length],
+    [''],
+    ['Por estado'],
+    ['Operativos',         byEst.Operativo],
+    ['No operativos',      byEst.NoOperativo],
+    ['En servicio técnico',byEst.ServicioTecnico],
+    ['Fuera de servicio',  byEst.FueraDeServicio],
+    ['De baja',            byEst.DeBaja],
+    ['Slots',              byEst.Slot],
+    [''],
+    ['Garantías activas',  garan],
+    ['Ciclos correctivos abiertos', ciclosAb],
+    ['Pendientes abiertos', pendientes],
+    [''],
+    [`MP ${MESES[mes-1]} ${anio} programadas`, programadas],
+    [`MP ${MESES[mes-1]} ${anio} ejecutadas`,  ejecutadas],
+    [`% cumplimiento ${MESES[mes-1]}`, programadas ? Math.round(ejecutadas/programadas*100) + '%' : '—'],
+  ];
+  const wsR = XLSX.utils.aoa_to_sheet(resumen);
+  wsR['!cols'] = [{wch:36},{wch:18}];
+  XLSX.utils.book_append_sheet(wb, wsR, 'Resumen');
+
+  // === Inventario ===
+  const inv = [['Servicio','Familia','Nombre','Marca','Modelo','Serie','Inventario','Carpeta','Frecuencia','Responsable','Estado','En garantía','Proveedor garantía','Ubicación']];
+  STATE.equipos.forEach(e => {
+    inv.push([
+      e.servicio||'', e.fam||'', e.nombre||'', e.marca||'', e.modelo||'',
+      e.serie||'', e.inventario||'', e.carpeta||'', e.frecuencia||'',
+      e.responsableMaster||'', ESTADO_LABEL[e.estado]||e.estado||'',
+      e.enGarantia ? 'Sí' : '', e.garantiaProveedor||'', e.ubicacion||'',
+    ]);
+  });
+  const wsI = XLSX.utils.aoa_to_sheet(inv);
+  wsI['!cols'] = [{wch:22},{wch:18},{wch:32},{wch:16},{wch:18},{wch:16},{wch:14},{wch:10},{wch:12},{wch:22},{wch:18},{wch:12},{wch:22},{wch:24}];
+  XLSX.utils.book_append_sheet(wb, wsI, 'Inventario');
+
+  // === En ST / NoOperativos ===
+  const st = [['Servicio','Equipo','Serie','Estado','Estado desde','Días','Folio SIGEM','Eslabón ciclo']];
+  STATE.equipos.filter(e => e.estado === 'ServicioTecnico' || e.estado === 'NoOperativo').forEach(e => {
+    const ciclo = (e.correctivos||[]).find(c => c.abierto);
+    const folio = ciclo?.apertura?.folioSigem || ciclo?.solicitud?.folioSigem || '';
+    const eslabon = ciclo ? ESLABONES_LABEL[ciclo.eslabonActual] || ciclo.eslabonActual : '';
+    st.push([e.servicio||'', e.nombre||'', e.serie||'', ESTADO_LABEL[e.estado], fmt.date(e.estadoDesde), fmt.daysSince(e.estadoDesde) ?? '', folio, eslabon]);
+  });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(st), 'En ST y NoOp');
+
+  // === MP Pendientes del mes ===
+  const pend = [['Servicio','Equipo','Serie','Frecuencia','Programado','Estado equipo','Responsable maestro','Días en estado']];
+  STATE.equipos.forEach(e => {
+    const prog = e.grilla?.[mes];
+    if (prog !== 'X' && prog !== 'R') return;
+    const hayEjec = (e.historial||[]).some(h => h.mes === mes && h.resultado === 'SI');
+    if (hayEjec) return;
+    pend.push([e.servicio||'', e.nombre||'', e.serie||'', e.frecuencia||'', prog, ESTADO_LABEL[e.estado]||e.estado, e.responsableMaster||'', fmt.daysSince(e.estadoDesde) ?? '']);
+  });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pend), `MP pendientes ${MESES[mes-1]}`);
+
+  // === Historial del año ===
+  const histRows = [['Fecha','Mes','Servicio','Equipo','Serie','Resultado','Estado final','Ejecutor','Observación']];
+  STATE.equipos.forEach(e => {
+    (e.historial||[]).filter(h => {
+      const d = new Date(h.fechaEvento || h.fecha || 0);
+      return !isNaN(d) && d.getFullYear() === anio;
+    }).forEach(h => {
+      histRows.push([
+        fmt.date(h.fechaEvento || h.fecha),
+        MESES[(h.mes||1)-1],
+        e.servicio || '', e.nombre || '', e.serie || '',
+        h.resultado || '',
+        h.estadoFinal ? (ESTADO_LABEL[h.estadoFinal] || h.estadoFinal) : '',
+        h.ejecutor || '', h.obs || '',
+      ]);
+    });
+  });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(histRows), `Historial ${anio}`);
+
+  // === Por servicio ===
+  const servicios = EQ.servicios();
+  const porServ = [['Servicio','Equipos','Operativos','No operativos','En ST','Fuera de servicio','De baja','En garantía',`Programadas ${MESES[mes-1]}`,`Ejecutadas ${MESES[mes-1]}`,'% cumplimiento']];
+  servicios.forEach(s => {
+    const eq = STATE.equipos.filter(e => e.servicio === s);
+    const c = (estado) => eq.filter(e => e.estado === estado).length;
+    const prog = eq.filter(e => e.grilla?.[mes] === 'X' || e.grilla?.[mes] === 'R').length;
+    const ejec = eq.filter(e => (e.historial||[]).some(h => h.mes === mes && h.resultado === 'SI')).length;
+    porServ.push([
+      s, eq.length, c('Operativo'), c('NoOperativo'), c('ServicioTecnico'),
+      c('FueraDeServicio'), c('DeBaja'), eq.filter(e => e.enGarantia).length,
+      prog, ejec, prog ? Math.round(ejec/prog*100) + '%' : '—',
+    ]);
+  });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(porServ), 'Por servicio');
+
+  const ts = now.toISOString().replace(/[:.]/g,'-');
+  XLSX.writeFile(wb, `PMP_reporte_${ts}.xlsx`);
+}
+
+/* ============================================================
+   PRINT · anexos imprimibles
+   ============================================================ */
+const PRINT_CSS = `
+  @page { size: A4; margin: 18mm 16mm; }
+  body { font-family: Inter, -apple-system, sans-serif; color: #111; font-size: 11px; margin: 0; }
+  h1 { font-size: 18px; margin: 0 0 4px 0; }
+  h2 { font-size: 14px; margin: 16px 0 6px 0; padding-bottom: 4px; border-bottom: 1px solid #999; }
+  h3 { font-size: 12px; margin: 10px 0 4px 0; }
+  .hdr { display:flex; justify-content: space-between; align-items: flex-end; border-bottom: 2px solid #111; padding-bottom: 8px; margin-bottom: 14px; }
+  .hdr .org { font-size: 10px; color: #555; line-height: 1.4; }
+  .hdr .org strong { display:block; font-size: 12px; color: #111; }
+  .meta { display:grid; grid-template-columns: 130px 1fr; row-gap: 4px; column-gap: 10px; font-size: 11px; }
+  .meta dt { color: #555; }
+  table { width:100%; border-collapse: collapse; font-size: 10.5px; margin: 8px 0; }
+  th, td { border: 1px solid #888; padding: 5px 7px; text-align:left; vertical-align: top; }
+  th { background: #eee; font-weight: 600; }
+  .sign { margin-top: 28px; display:grid; grid-template-columns: 1fr 1fr; gap: 36px; }
+  .sign div { text-align: center; padding-top: 30px; border-top: 1px solid #444; font-size: 10.5px; }
+  .foot { position: fixed; bottom: 6mm; left: 16mm; right: 16mm; font-size: 9px; color: #666; display: flex; justify-content: space-between; border-top: .5px solid #ccc; padding-top: 4px; }
+  .pill { display:inline-block; padding:1px 6px; border-radius: 8px; font-size: 9.5px; background:#eee; }
+  .pill.warn { background: #fbf1d5; color: #7a4d00; }
+  .pill.danger { background: #fbe4e4; color: #9b1010; }
+  .obs { padding: 8px 10px; border: 1px dashed #888; background: #fafafa; min-height: 36px; }
+`;
+
+function printDoc(content, title='Documento PMP') {
+  const iframe = document.createElement('iframe');
+  iframe.setAttribute('aria-hidden','true');
+  iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;';
+  document.body.appendChild(iframe);
+  const doc = iframe.contentDocument || iframe.contentWindow.document;
+  doc.open();
+  doc.write(`<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>${PRINT_CSS}</style></head><body>${content}</body></html>`);
+  doc.close();
+  setTimeout(() => {
+    try { iframe.contentWindow.focus(); iframe.contentWindow.print(); } catch(e) {}
+    setTimeout(() => iframe.remove(), 1200);
+  }, 350);
+}
+
+function printHeader(titulo, subtitulo='') {
+  return `
+    <div class="hdr">
+      <div>
+        <h1>${escapeHtml(titulo)}</h1>
+        ${subtitulo ? `<div style="color:#555;font-size:11px">${escapeHtml(subtitulo)}</div>` : ''}
+      </div>
+      <div class="org">
+        <strong>Hospital Dr. Hernán Henríquez Aravena</strong>
+        Subdepartamento de Equipamiento Clínico (SEC)<br>
+        Temuco · ${fmt.dateLong(new Date())}
+      </div>
+    </div>
+  `;
+}
+
+function printFooter() {
+  return `<div class="foot"><span>PMP · SEC · HHHA Temuco</span><span>Documento generado ${fmt.datetime(new Date())}</span></div>`;
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function metaDl(pairs) {
+  return `<dl class="meta">${pairs.map(([k,v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd>`).join('')}</dl>`;
+}
+
+// Anexo 1 — Ficha técnica
+function imprimirAnexo1(equipo) {
+  const e = equipo;
+  const ciclos = (e.correctivos||[]).slice(-3).reverse();
+  const histRows = (e.historial||[]).slice(-12).reverse();
+  const cs = ciclos.length ? `
+    <h2>Últimos ciclos correctivos</h2>
+    <table><thead><tr><th>Apertura</th><th>Folio SIGEM</th><th>Eslabón</th><th>Ruta</th><th>Estado</th></tr></thead><tbody>
+    ${ciclos.map(c => `<tr>
+      <td>${escapeHtml(fmt.date(c.apertura?.fechaEvento || c.apertura?.fecha))}</td>
+      <td>${escapeHtml(c.apertura?.folioSigem || '')}</td>
+      <td>${escapeHtml(ESLABONES_LABEL[c.eslabonActual] || c.eslabonActual || '')}</td>
+      <td>${escapeHtml(c.ruta ? c.ruta.replace('_',' ') : '')}</td>
+      <td>${c.abierto?'<span class="pill warn">abierto</span>':'<span class="pill">cerrado</span>'}</td>
+    </tr>`).join('')}
+    </tbody></table>` : '';
+  const hs = histRows.length ? `
+    <h2>Historial reciente de MP</h2>
+    <table><thead><tr><th>Fecha</th><th>Mes</th><th>Resultado</th><th>Ejecutor</th><th>Observación</th></tr></thead><tbody>
+    ${histRows.map(h => `<tr>
+      <td>${escapeHtml(fmt.date(h.fechaEvento || h.fecha))}</td>
+      <td>${escapeHtml(MESES[(h.mes||1)-1])}</td>
+      <td>${escapeHtml(h.resultado || '')}</td>
+      <td>${escapeHtml(h.ejecutor || '')}</td>
+      <td>${escapeHtml(h.obs || '')}</td>
+    </tr>`).join('')}
+    </tbody></table>` : '';
+
+  const html = `
+    ${printHeader('Anexo 1 · Ficha técnica del equipo', 'Programa de Mantenimiento Preventivo')}
+    ${metaDl([
+      ['Nombre',     e.nombre || '—'],
+      ['Familia',    e.fam || '—'],
+      ['Servicio',   e.servicio || '—'],
+      ['Ubicación',  e.ubicacion || '—'],
+      ['Marca',      e.marca || '—'],
+      ['Modelo',     e.modelo || '—'],
+      ['Serie',      e.serie || '—'],
+      ['Inventario', e.inventario || '—'],
+      ['Carpeta',    e.carpeta ?? '—'],
+      ['Año instalación', e.anio || '—'],
+      ['Vida útil residual', e.vidaUtil || '—'],
+      ['Clasificación', e.clasificacion || '—'],
+      ['Frecuencia MP', e.frecuencia || '—'],
+      ['Responsable maestro', e.responsableMaster || '—'],
+      ['Estado actual', ESTADO_LABEL[e.estado] || e.estado || '—'],
+      ['Garantía',   e.enGarantia ? `Vigente${e.garantiaHasta?' hasta '+fmt.date(e.garantiaHasta):''}${e.garantiaProveedor?' · '+e.garantiaProveedor:''}` : '—'],
+      ['Observación', e.observacion || '—'],
+    ])}
+    ${cs}
+    ${hs}
+    <div class="sign">
+      <div>Ingeniero responsable<br><small>${escapeHtml(e.responsableMaster||'')}</small></div>
+      <div>Jefe SEC</div>
+    </div>
+    ${printFooter()}
+  `;
+  printDoc(html, `Anexo 1 · ${e.nombre || e.serie || 'equipo'}`);
+}
+
+// Anexo 3 — Reprogramación de MP
+function imprimirAnexo3(equipo, mp) {
+  const causal = CAUSALES[mp.resultado];
+  const html = `
+    ${printHeader('Anexo 3 · Reprogramación de MP', `${MESES[(mp.mes||1)-1]} ${new Date(mp.fechaEvento||mp.fecha||0).getFullYear()}`)}
+    ${metaDl([
+      ['Equipo',     equipo.nombre || '—'],
+      ['Servicio',   equipo.servicio || '—'],
+      ['Serie',      equipo.serie || '—'],
+      ['Inventario', equipo.inventario || '—'],
+      ['Frecuencia MP', equipo.frecuencia || '—'],
+      ['Mes afectado', MESES[(mp.mes||1)-1]],
+      ['Fecha del evento', fmt.date(mp.fechaEvento || mp.fecha)],
+      ['Causal', `${mp.resultado} · ${causal ? causal.label : ''}`],
+      ['Grupo causal', causal ? `Grupo ${causal.grupo}` : '—'],
+      ['Ejecutor / observador', mp.ejecutor || '—'],
+    ])}
+    <h2>Justificación</h2>
+    <div class="obs">${escapeHtml(mp.obs || '—')}</div>
+    <div class="sign">
+      <div>Ingeniero SEC</div>
+      <div>Jefe de servicio clínico</div>
+    </div>
+    ${printFooter()}
+  `;
+  printDoc(html, `Anexo 3 · ${equipo.nombre || 'equipo'} · ${MESES[(mp.mes||1)-1]}`);
+}
+
+// Anexo 4 — Retiro por seguridad (causal Grupo A > 30 días)
+function imprimirAnexo4(equipo, mp) {
+  const causal = CAUSALES[mp.resultado];
+  const dias = fmt.daysSince(mp.fechaEvento || mp.fecha);
+  const html = `
+    ${printHeader('Anexo 4 · Retiro por seguridad', 'Equipo con causal Grupo A no resuelta')}
+    <div style="padding:10px 12px;border:1px solid #b91c1c;background:#fbe4e4;color:#9b1010;font-size:11px;margin-bottom:14px;">
+      <strong>ATENCIÓN:</strong> este equipo presenta una causal del Grupo A sin resolución por más de ${CAUSAL_GRUPO_A_DIAS} días.
+      Corresponde gestionar su retiro por seguridad.
+    </div>
+    ${metaDl([
+      ['Equipo',     equipo.nombre || '—'],
+      ['Servicio',   equipo.servicio || '—'],
+      ['Ubicación',  equipo.ubicacion || '—'],
+      ['Serie',      equipo.serie || '—'],
+      ['Inventario', equipo.inventario || '—'],
+      ['Causal vigente', `${mp.resultado} · ${causal?.label || ''}`],
+      ['Fecha de la causal', fmt.date(mp.fechaEvento || mp.fecha)],
+      ['Días transcurridos', dias != null ? `${dias} días (${dias - CAUSAL_GRUPO_A_DIAS} sobre el límite)` : '—'],
+      ['Ejecutor original', mp.ejecutor || '—'],
+    ])}
+    <h2>Observación de la causal</h2>
+    <div class="obs">${escapeHtml(mp.obs || '—')}</div>
+    <h2>Acuerdo</h2>
+    <div class="obs" style="min-height:60px"></div>
+    <div class="sign">
+      <div>Jefe SEC</div>
+      <div>Jefe de servicio clínico</div>
+    </div>
+    ${printFooter()}
+  `;
+  printDoc(html, `Anexo 4 · ${equipo.nombre || 'equipo'}`);
+}
+
+// Anexo 5 — Puesta en marcha
+function imprimirAnexo5(equipo, mp) {
+  const html = `
+    ${printHeader('Anexo 5 · Puesta en marcha', `${MESES[(mp.mes||1)-1]} ${new Date(mp.fechaEvento||mp.fecha||0).getFullYear()}`)}
+    ${metaDl([
+      ['Equipo',     equipo.nombre || '—'],
+      ['Servicio',   equipo.servicio || '—'],
+      ['Marca / Modelo', [equipo.marca, equipo.modelo].filter(Boolean).join(' / ') || '—'],
+      ['Serie',      equipo.serie || '—'],
+      ['Inventario', equipo.inventario || '—'],
+      ['Fecha de puesta en marcha', fmt.date(mp.fechaEvento || mp.fecha)],
+      ['Ejecutor', mp.ejecutor || '—'],
+      ['Estado final', mp.estadoFinal ? (ESTADO_LABEL[mp.estadoFinal]||mp.estadoFinal) : 'Operativo'],
+    ])}
+    <h2>Verificaciones</h2>
+    <table><tbody>
+      <tr><th style="width:60%">Encendido y autotest sin fallas</th><td>__________</td></tr>
+      <tr><th>Calibración y parámetros revisados</th><td>__________</td></tr>
+      <tr><th>Accesorios completos</th><td>__________</td></tr>
+      <tr><th>Capacitación al usuario realizada</th><td>__________</td></tr>
+      <tr><th>Documentación entregada</th><td>__________</td></tr>
+    </tbody></table>
+    <h2>Observación</h2>
+    <div class="obs">${escapeHtml(mp.obs || '—')}</div>
+    <div class="sign">
+      <div>Ingeniero SEC</div>
+      <div>Jefe de servicio clínico</div>
+    </div>
+    ${printFooter()}
+  `;
+  printDoc(html, `Anexo 5 · ${equipo.nombre || 'equipo'}`);
+}
+
+/* ============================================================
+   INFORME mensual por servicio
+   ============================================================ */
+function calcularInformeServicio(servicio, mes, anio) {
+  const eq = STATE.equipos.filter(e => e.servicio === servicio && !e.esSlot && e.estado !== 'DeBaja');
+  const items = eq.map(e => {
+    const prog = e.grilla?.[mes];
+    const hist = (e.historial||[]).filter(h => h.mes === mes && new Date(h.fechaEvento||h.fecha||0).getFullYear() === anio)
+      .sort((a,b) => new Date(b.fechaEvento||b.fecha||0) - new Date(a.fechaEvento||a.fecha||0));
+    const ultimo = hist[0] || null;
+    return { equipo: e, prog, ultimo };
+  });
+
+  return {
+    servicio, mes, anio,
+    items,
+    totales: {
+      equipos:       eq.length,
+      programadas:   items.filter(i => i.prog === 'X' || i.prog === 'R').length,
+      ejecutadas:    items.filter(i => i.ultimo?.resultado === 'SI').length,
+      causalizadas:  items.filter(i => i.ultimo && CAUSALES[i.ultimo.resultado]).length,
+      pendientes:    items.filter(i => (i.prog === 'X' || i.prog === 'R') && !i.ultimo).length,
+    },
+  };
+}
+
+async function exportInformeServicio(info) {
+  await ensureXLSX();
+  const wb = XLSX.utils.book_new();
+  const head = [
+    [`Informe ${info.servicio} · ${MESES[info.mes-1]} ${info.anio}`],
+    ['Equipos totales', info.totales.equipos],
+    ['MP programadas',  info.totales.programadas],
+    ['MP ejecutadas',   info.totales.ejecutadas],
+    ['MP causalizadas', info.totales.causalizadas],
+    ['MP pendientes',   info.totales.pendientes],
+    [''],
+    ['Equipo','Serie','Inventario','Frecuencia','Programado','Resultado','Ejecutor','Observación','Estado equipo'],
+    ...info.items.map(({equipo:e, prog, ultimo}) => [
+      e.nombre, e.serie, e.inventario, e.frecuencia, prog || '',
+      ultimo?.resultado || '', ultimo?.ejecutor || '', ultimo?.obs || '',
+      ESTADO_LABEL[e.estado] || e.estado,
+    ]),
+  ];
+  const ws = XLSX.utils.aoa_to_sheet(head);
+  ws['!cols'] = [{wch:32},{wch:14},{wch:14},{wch:12},{wch:11},{wch:11},{wch:22},{wch:30},{wch:18}];
+  XLSX.utils.book_append_sheet(wb, ws, 'Informe');
+  XLSX.writeFile(wb, `informe_${normalize(info.servicio).replace(/\s+/g,'_')}_${info.anio}_${String(info.mes).padStart(2,'0')}.xlsx`);
+}
+
+function imprimirInformeServicio(info) {
+  const rows = info.items.map(({equipo:e, prog, ultimo}) => `
+    <tr>
+      <td>${escapeHtml(e.nombre || '')}</td>
+      <td>${escapeHtml(e.serie || '')}</td>
+      <td>${escapeHtml(e.frecuencia || '')}</td>
+      <td>${escapeHtml(prog || '')}</td>
+      <td>${escapeHtml(ultimo?.resultado || '—')}</td>
+      <td>${escapeHtml(ultimo?.ejecutor || '')}</td>
+      <td>${escapeHtml(ultimo?.obs || '')}</td>
+      <td>${escapeHtml(ESTADO_LABEL[e.estado] || e.estado)}</td>
+    </tr>`).join('');
+  const html = `
+    ${printHeader(`Informe ${info.servicio}`, `${MESES[info.mes-1]} ${info.anio}`)}
+    <table><tbody>
+      <tr><th>Equipos totales</th><td>${info.totales.equipos}</td>
+          <th>MP programadas</th><td>${info.totales.programadas}</td>
+          <th>MP ejecutadas</th><td>${info.totales.ejecutadas}</td></tr>
+      <tr><th>MP causalizadas</th><td>${info.totales.causalizadas}</td>
+          <th>MP pendientes</th><td>${info.totales.pendientes}</td>
+          <th>% cumplimiento</th><td>${info.totales.programadas ? Math.round(info.totales.ejecutadas/info.totales.programadas*100)+'%' : '—'}</td></tr>
+    </tbody></table>
+    <h2>Detalle por equipo</h2>
+    <table>
+      <thead><tr><th>Equipo</th><th>Serie</th><th>Frec.</th><th>Prog.</th><th>Resultado</th><th>Ejecutor</th><th>Obs.</th><th>Estado</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${printFooter()}
+  `;
+  printDoc(html, `Informe ${info.servicio} ${MESES[info.mes-1]} ${info.anio}`);
+}
+
+/* ============================================================
    QUERY · período activo y agrupación por técnico
    ============================================================ */
 function listaPeriodos() {
@@ -4531,7 +4954,242 @@ function abrirModalNuevaTarea() {
     },
   });
 }
-VIEWS.reportes = soonView('Reportes', 'Excel multi-hoja y anexos imprimibles: It.5.');
+VIEWS.reportes = {
+  title: 'Reportes',
+  render(root, params={}) {
+    root.appendChild(viewHeader({
+      title: 'Reportes',
+      desc: 'Exportes Excel, informe mensual por servicio y anexos imprimibles.',
+    }));
+
+    if (!STATE.equipos.length) {
+      root.appendChild(emptyState({ icon:'ti-report', title:'Sin datos', desc:'Cargá el maestro Excel primero.' }));
+      return;
+    }
+
+    // ===== Exportes Excel =====
+    const sec1 = h('div.section');
+    sec1.appendChild(h('h3','Exportes Excel'));
+    sec1.appendChild(h('div', { style:{display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(280px, 1fr))', gap:'10px'} }, [
+      reporteCard('Reporte general', 'Multi-hoja: resumen, inventario, ST/NoOp, MP pendientes del mes, historial del año, pivote por servicio.', 'ti-file-spreadsheet', async () => {
+        try { await exportReporteGeneral(); UI.toast('Reporte generado.', 'success'); } catch(e) { bus.emit('error', e); }
+      }),
+      reporteCard('MP pendientes (mes actual)', 'Listado de equipos con MP programada y sin ejecutar este mes.', 'ti-clipboard-list', async () => {
+        try { await exportMPPendientes(); UI.toast('Listado descargado.', 'success'); } catch(e) { bus.emit('error', e); }
+      }),
+      reporteCard('Historial completo', 'Todas las MP registradas — todos los años.', 'ti-history', async () => {
+        try { await exportHistorialCompleto(); UI.toast('Historial descargado.', 'success'); } catch(e) { bus.emit('error', e); }
+      }),
+    ]));
+    root.appendChild(sec1);
+
+    // ===== Informe mensual por servicio =====
+    const sec2 = h('div.section');
+    sec2.appendChild(h('h3','Informe mensual por servicio'));
+    sec2.appendChild(renderInformeServicioBlock(params));
+    root.appendChild(sec2);
+
+    // ===== Anexos imprimibles =====
+    const sec3 = h('div.section');
+    sec3.appendChild(h('h3','Anexos imprimibles'));
+    sec3.appendChild(renderAnexosBlock());
+    root.appendChild(sec3);
+  },
+};
+
+function reporteCard(title, desc, icon, onclick) {
+  return h('div.card', { style:{cursor:'pointer'}, onclick }, [
+    h('div', { style:{display:'flex', alignItems:'center', gap:'10px', marginBottom:'6px'} }, [
+      h('i.ti', { class:'ti '+icon, style:{fontSize:'20px', color:'var(--info)'} }),
+      h('div', { style:{fontWeight:500, fontSize:'13px'} }, title),
+    ]),
+    h('div', { style:{color:'var(--ink-3)', fontSize:'12px'} }, desc),
+    h('div', { style:{marginTop:'10px'} }, [
+      h('button.btn.sm', [ h('i.ti.ti-download'), 'Generar' ]),
+    ]),
+  ]);
+}
+
+function renderInformeServicioBlock(params) {
+  const card = h('div.card');
+  const servicios = EQ.servicios();
+  if (!servicios.length) {
+    card.appendChild(h('div', { style:{color:'var(--ink-3)', fontSize:'12.5px'} }, 'No hay servicios cargados.'));
+    return card;
+  }
+  let snap = {
+    servicio: params.servicio || servicios[0],
+    mes:      params.mes      || new Date().getMonth()+1,
+    anio:     params.anio     || new Date().getFullYear(),
+  };
+  const previewArea = h('div');
+
+  function refresh() {
+    const info = calcularInformeServicio(snap.servicio, snap.mes, snap.anio);
+    previewArea.innerHTML = '';
+    const totales = info.totales;
+    previewArea.appendChild(h('div.kpi-grid', { style:{marginBottom:'10px'} }, [
+      kpiCard({ label:'Equipos',      value: fmt.number(totales.equipos) }),
+      kpiCard({ label:'Programadas',  value: fmt.number(totales.programadas) }),
+      kpiCard({ label:'Ejecutadas',   value: fmt.number(totales.ejecutadas), kind:'success' }),
+      kpiCard({ label:'Causalizadas', value: fmt.number(totales.causalizadas), kind:'warning' }),
+      kpiCard({ label:'Pendientes',   value: fmt.number(totales.pendientes), kind: totales.pendientes ? 'danger' : 'muted' }),
+    ]));
+    const acts = h('div', { style:{display:'flex', gap:'8px', marginTop:'4px'} }, [
+      h('button.btn', { onclick: () => exportInformeServicio(info).then(()=>UI.toast('Excel descargado.','success')).catch(e=>bus.emit('error',e)) }, [ h('i.ti.ti-file-spreadsheet'), 'Excel' ]),
+      h('button.btn', { onclick: () => imprimirInformeServicio(info) }, [ h('i.ti.ti-printer'), 'Imprimir' ]),
+    ]);
+    previewArea.appendChild(acts);
+  }
+
+  const ctrl = h('div', { style:{display:'grid', gridTemplateColumns:'2fr 1fr 1fr', gap:'10px', marginBottom:'12px'} }, [
+    field('Servicio', selectCtl(servicios, snap.servicio, { onchange:(e)=> { snap.servicio = e.target.value; refresh(); } })),
+    field('Mes',      selectCtl(MESES.map((n,i)=>({value:String(i+1),label:n})), String(snap.mes), { onchange:(e)=> { snap.mes = Number(e.target.value); refresh(); } })),
+    field('Año',      inputCtl({ type:'number', min:2020, max:2100, value: snap.anio, oninput:(e)=> { snap.anio = Number(e.target.value)||snap.anio; refresh(); } })),
+  ]);
+  card.appendChild(ctrl);
+  card.appendChild(previewArea);
+  refresh();
+  return card;
+}
+
+function renderAnexosBlock() {
+  const card = h('div.card');
+  let eqUuid = '';
+  const search = h('div.search', { style:{marginBottom:'12px'} }, [
+    h('i.ti.ti-search'),
+    h('input', { type:'text', placeholder:'Buscar equipo por nombre, serie o inventario…' }),
+  ]);
+  const results = h('div', { style:{maxHeight:'140px', overflowY:'auto', marginBottom:'12px', border:'.5px solid var(--line)', borderRadius:'6px'} });
+  const actions = h('div', { style:{display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(220px, 1fr))', gap:'10px'} });
+
+  function renderResults() {
+    const q = search.querySelector('input').value;
+    results.innerHTML = '';
+    if (!q.trim()) {
+      results.appendChild(h('div', { style:{padding:'12px', color:'var(--ink-3)', fontSize:'12px'} }, 'Escribí para buscar un equipo…'));
+      return;
+    }
+    EQ.search(q).slice(0, 12).forEach(e => {
+      const item = h('div', {
+        style:{padding:'8px 12px', borderBottom:'.5px solid var(--line)', cursor:'pointer', background: eqUuid===e.uuid?'var(--paper-2)':'transparent'},
+        onclick: () => { eqUuid = e.uuid; renderResults(); renderActions(); }
+      }, [
+        h('div', { style:{fontWeight:500, fontSize:'12.5px'} }, e.nombre || '—'),
+        h('div', { style:{color:'var(--ink-3)', fontSize:'11px'} }, `${e.servicio || ''} · ${e.serie || ''} · ${e.inventario || ''}`),
+      ]);
+      results.appendChild(item);
+    });
+  }
+  function renderActions() {
+    actions.innerHTML = '';
+    const e = eqUuid ? EQ.byUuid(eqUuid) : null;
+    if (!e) {
+      actions.appendChild(h('div', { style:{color:'var(--ink-3)', fontSize:'12.5px'} }, 'Elegí un equipo para habilitar los anexos.'));
+      return;
+    }
+    // Anexo 1 always
+    actions.appendChild(anexoCard('Anexo 1', 'Ficha técnica del equipo', 'ti-file-text', () => imprimirAnexo1(e)));
+    // Anexo 3, 4 — requieren causal
+    const causales = (e.historial||[]).filter(h => CAUSALES[h.resultado]).sort((a,b) => new Date(b.fechaEvento||b.fecha||0) - new Date(a.fechaEvento||a.fecha||0));
+    actions.appendChild(anexoCard('Anexo 3', 'Reprogramación de MP (elige causal)', 'ti-calendar-x',
+      causales.length ? () => elegirCausalParaAnexo(e, causales, imprimirAnexo3) : null,
+      causales.length ? null : 'Sin causales registradas',
+    ));
+    const grupoA30 = causales.find(h => CAUSALES[h.resultado].grupo === 'A' && (fmt.daysSince(h.fechaEvento||h.fecha)||0) > CAUSAL_GRUPO_A_DIAS);
+    actions.appendChild(anexoCard('Anexo 4', 'Retiro por seguridad (Grupo A >30d)', 'ti-shield-x',
+      grupoA30 ? () => imprimirAnexo4(e, grupoA30) : null,
+      grupoA30 ? null : 'No corresponde — sin causal Grupo A >30d',
+    ));
+    const pms = (e.historial||[]).filter(h => h.resultado === 'SI' && (h.estadoFinal === 'Operativo')).sort((a,b) => new Date(b.fechaEvento||b.fecha||0) - new Date(a.fechaEvento||a.fecha||0));
+    actions.appendChild(anexoCard('Anexo 5', 'Puesta en marcha del equipo', 'ti-rocket',
+      pms.length ? () => elegirCausalParaAnexo(e, pms, imprimirAnexo5, 'Elegí la puesta en marcha:') : null,
+      pms.length ? null : 'Sin registros SI · Operativo',
+    ));
+  }
+
+  search.querySelector('input').addEventListener('input', renderResults);
+  renderResults();
+  renderActions();
+  card.appendChild(search);
+  card.appendChild(results);
+  card.appendChild(actions);
+  return card;
+}
+
+function anexoCard(num, desc, icon, onclick, deshabilitadoRazon) {
+  return h(`div.card ${deshabilitadoRazon?'':''}`.trim(), {
+    style: deshabilitadoRazon
+      ? { opacity:'.55', padding:'12px' }
+      : { padding:'12px', cursor: onclick ? 'pointer':'default' },
+    onclick: deshabilitadoRazon ? null : onclick,
+  }, [
+    h('div', { style:{display:'flex', alignItems:'center', gap:'8px', marginBottom:'4px'} }, [
+      h('i.ti', { class:'ti '+icon, style:{fontSize:'18px', color: deshabilitadoRazon?'var(--ink-4)':'var(--info)'} }),
+      h('div', { style:{fontWeight:500, fontSize:'13px'} }, num),
+    ]),
+    h('div', { style:{color:'var(--ink-3)', fontSize:'11.5px'} }, desc),
+    deshabilitadoRazon ? h('div', { style:{color:'var(--ink-4)', fontSize:'10.5px', marginTop:'6px', fontStyle:'italic'} }, deshabilitadoRazon) : null,
+  ]);
+}
+
+function elegirCausalParaAnexo(equipo, registros, imprimir, label='Elegí la causal:') {
+  UI.modal({
+    title: 'Elegí el registro a usar',
+    sub: equipo.nombre,
+    size: 'sm',
+    content: (body, { close }) => {
+      body.appendChild(h('p', { style:{margin:'0 0 10px 0', fontSize:'12.5px', color:'var(--ink-3)'} }, label));
+      registros.forEach(r => {
+        body.appendChild(h('button.btn', {
+          style:{ display:'flex', justifyContent:'flex-start', width:'100%', marginBottom:'6px' },
+          onclick: () => { close(); imprimir(equipo, r); },
+        }, [
+          h('i.ti.ti-arrow-right'),
+          h('div', { style:{textAlign:'left'} }, [
+            h('div', { style:{fontWeight:500, fontSize:'12.5px'} }, `${r.resultado} · ${fmt.date(r.fechaEvento || r.fecha)}`),
+            h('div', { style:{fontSize:'11px', color:'var(--ink-3)'} }, `Mes ${MESES[(r.mes||1)-1]} · ${r.ejecutor || '—'}`),
+          ]),
+        ]));
+      });
+    },
+  });
+}
+
+async function exportMPPendientes() {
+  await ensureXLSX();
+  const now = new Date();
+  const mes = now.getMonth()+1;
+  const data = [['Servicio','Equipo','Serie','Frecuencia','Programado','Estado equipo','Responsable maestro','Días en estado']];
+  STATE.equipos.forEach(e => {
+    const prog = e.grilla?.[mes];
+    if (prog !== 'X' && prog !== 'R') return;
+    if ((e.historial||[]).some(h => h.mes === mes && h.resultado === 'SI')) return;
+    data.push([e.servicio||'', e.nombre||'', e.serie||'', e.frecuencia||'', prog, ESTADO_LABEL[e.estado]||e.estado, e.responsableMaster||'', fmt.daysSince(e.estadoDesde) ?? '']);
+  });
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(data), `Pendientes ${MESES[mes-1]}`);
+  XLSX.writeFile(wb, `MP_pendientes_${now.getFullYear()}_${String(mes).padStart(2,'0')}.xlsx`);
+}
+
+async function exportHistorialCompleto() {
+  await ensureXLSX();
+  const rows = [['Fecha','Mes','Año','Servicio','Equipo','Serie','Inventario','Resultado','Estado final','Ejecutor','Observación','Motivo cambio ejecutor']];
+  STATE.equipos.forEach(e => (e.historial||[]).forEach(h => {
+    const d = new Date(h.fechaEvento || h.fecha || 0);
+    rows.push([
+      fmt.date(h.fechaEvento || h.fecha),
+      MESES[(h.mes||1)-1],
+      isNaN(d) ? '' : d.getFullYear(),
+      e.servicio||'', e.nombre||'', e.serie||'', e.inventario||'',
+      h.resultado||'', h.estadoFinal ? (ESTADO_LABEL[h.estadoFinal]||h.estadoFinal) : '',
+      h.ejecutor||'', h.obs||'', h.motivoCambioEjecutor||'',
+    ]);
+  }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), 'Historial');
+  XLSX.writeFile(wb, `historial_completo_${new Date().toISOString().slice(0,10)}.xlsx`);
+}
 VIEWS.agenda   = soonView('Agenda · Contactos', 'Contactos por servicio clínico: It.6.');
 
 VIEWS.config = {

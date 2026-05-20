@@ -1,5 +1,24 @@
 # Changelog
 
+## It.5 — Reportes, informes y anexos imprimibles
+
+- Vista **Reportes** con tres bloques:
+  - **Exportes Excel**: Reporte general multi-hoja (Resumen / Inventario
+    / En ST / MP Pendientes / Historial del año / Pivote por servicio),
+    MP Pendientes del mes y Historial completo (todos los años).
+  - **Informe mensual por servicio**: selector servicio/mes/año, KPIs
+    en vivo (programadas, ejecutadas, causalizadas, pendientes) y
+    exporte a Excel o impresión directa.
+  - **Anexos imprimibles** (1, 3, 4, 5): buscador de equipo + 4 tarjetas
+    que se habilitan o se deshabilitan según el estado real del equipo
+    (p. ej. Anexo 4 solo si hay causal Grupo A > 30 días).
+- Sistema de impresión via `<iframe>` oculto con CSS A4 dedicado;
+  header con nombre del hospital y SEC, footer con timestamp.
+- Anexo 1: ficha técnica con últimos 3 ciclos y últimos 12 registros de
+  MP. Anexo 3: reprogramación de MP con justificación. Anexo 4: retiro
+  por seguridad con banner rojo. Anexo 5: puesta en marcha con
+  checklist.
+
 ## It.4 — Entregas + asignación mensual
 
 - **Importación de asignación mensual** (.xlsx): detecta encabezados
