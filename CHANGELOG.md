@@ -1,5 +1,83 @@
 # Changelog
 
+## Fase 1 · Iteración R2 — Fixes del feedback de uso
+
+### 1. Inventario muestra columna ID
+
+La columna ID del maestro (campo `e.id`) aparece como primera
+columna de la tabla, monoespaciada, con tooltip en hover. Sentinel
+de paginación ajustado a 9 columnas.
+
+### 2. Plantilla XLSX no abría — bug encontrado y reparado
+
+El bug del export anterior **no era de ordenamiento ECMA-376 entre
+sheetData y pageMargins** como pensé. SheetJS escribe
+`<ignoredErrors>` (elemento #28 del schema) inmediatamente después
+de `</sheetData>`, sin un `<pageMargins>` intermedio. Mi inyector
+buscaba `<pageMargins>` como ancla, no lo encontraba, y caía a la
+opción de último recurso: insertar antes de `</worksheet>`. Eso
+dejaba la secuencia `sheetData → ignoredErrors → dataValidations →
+fin`, con `dataValidations` (#18) después de `ignoredErrors` (#28).
+Excel rechazaba el archivo como dañado.
+
+Fix: la inyección ahora ocurre **siempre justo después de
+`</sheetData>`**, dando la secuencia válida `sheetData (#6) →
+dataValidations (#18) → ignoredErrors (#28) → fin`. Validado con
+**openpyxl** (lector estricto del schema OOXML) que abre el
+archivo y lee correctamente la dataValidation y el estado oculto
+de la hoja Tecnicos. Si no hay técnicos disponibles, la validación
+no se inyecta (se evita formula con rango inválido). Atributos de
+error en ASCII puro para evitar problemas de encoding en algunas
+versiones antiguas de Excel.
+
+### 3. Plantilla filtra a equipos del mes
+
+`exportPlantillaAsignacion(periodo)` ahora incluye **solo equipos
+con marca de grilla X/R/PM/RA en el mes del período**. Antes
+exportaba todos los equipos activos. Si no hay nada programado en
+el mes, la función lanza un error claro pidiendo revisar la grilla.
+
+Columnas nuevas: agregada **"Prog. {Mes}"** entre Frecuencia MP y
+Responsable, mostrando la marca de grilla del mes para que el
+ingeniero sepa qué corresponde hacer. Responsable se movió a
+columna I (ajustado `sqref` del dataValidation).
+
+Pre-llenado de Responsable busca primero la asignación del período;
+si no hay, usa la asignación previa más reciente de ese equipo en
+cualquier período cargado.
+
+### 4. KPIs del mes en vista Entregas
+
+Al cambiar el período, ahora aparece una sección **"Mes {Mes} {Año}"**
+con 5 KPIs computados sobre todos los equipos activos:
+
+- Con marca en grilla (X/R/PM/RA) — clickeable, lleva a PMP filtrado
+- Programadas (X/R)
+- Ejecutadas (SI) con % de cumplimiento y semáforo
+- Causalizadas
+- Pendientes (programadas − ejecutadas − causalizadas)
+
+Una segunda sección **"Asignación de responsables"** mantiene los KPIs
+de técnicos activos / equipos asignados / sin asignar.
+
+### 5. Quitada la mención al "Responsable MP" del maestro
+
+El header de Entregas decía "sin archivo mensual — usando Responsable
+MP del maestro" (residuo de la iteración anterior). Ahora dice "sin
+archivo de asignación — todos los equipos quedan en (sin asignar)",
+consistente con la decisión de la R1 de que `responsableMaster` es
+referencial.
+
+### Simulaciones R2
+
+| # | Flujo | Resultado |
+|---|-------|-----------|
+| 1-15 | Suite anterior completa | OK · sin regresiones |
+| R2.A | Columna ID en Inventario | OK · primera columna, valor del maestro |
+| R2.B | KPIs del mes al cambiar período en Entregas | OK · 5 KPIs presentes y actualizan al cambiar período |
+| R2.C | Plantilla XLSX validada con openpyxl | OK · 9 columnas, dataValidation tipo list correctamente referenciada, hoja Tecnicos oculta, archivo abre limpio en lector estricto |
+| R2.D | Plantilla filtra al mes | OK · 30 equipos con marca de mayo → plantilla con 30 filas, no 200 |
+
 ## Fase 1 · Iteración R1 — Pulido + correcciones del brief de revisión
 
 ### Inconsistencias corregidas

@@ -2485,7 +2485,17 @@ function detectarPeriodoArchivo(name) {
 async function exportPlantillaAsignacion(periodo) {
   await ensureXLSX();
   await ensureJSZip();
-  const equipos = STATE.equipos.filter(e => !e.esSlot && e.estado !== 'DeBaja');
+  // Filtrar a equipos con marca de grilla en el mes del período (X/R/PM/RA).
+  // De este modo cada plantilla mensual contiene solo lo que realmente toca ese mes.
+  const mesNum = Number((periodo || periodoActual()).split('-')[1]);
+  const equipos = STATE.equipos.filter(e => {
+    if (e.esSlot || e.estado === 'DeBaja') return false;
+    const g = e.grilla?.[mesNum];
+    return g === 'X' || g === 'R' || g === 'PM' || g === 'RA';
+  });
+  if (!equipos.length) {
+    throw new Error(`No hay equipos con MP programada (X/R/PM/RA) en ${periodoLabel(periodo)}. Revisá la grilla anual antes de exportar.`);
+  }
   const tecnicos = sugerirTecnicos();
   // Pre-llenado: asignación del período actual; si no hay, busca la última asignación del equipo en cualquier período previo.
   const periodos = listaPeriodos();
@@ -2498,7 +2508,7 @@ async function exportPlantillaAsignacion(periodo) {
     return '';
   }
 
-  const headers = ['Carpeta','N° Inventario','N° Serie','Equipo','Servicio','Familia','Frecuencia MP','Responsable'];
+  const headers = ['Carpeta','N° Inventario','N° Serie','Equipo','Servicio','Familia','Frecuencia MP','Prog. ' + MESES[mesNum-1],'Responsable'];
   const data = [headers];
   equipos.forEach(e => {
     data.push([
@@ -2509,13 +2519,14 @@ async function exportPlantillaAsignacion(periodo) {
       e.servicio || '',
       e.fam || '',
       e.frecuencia || '',
+      e.grilla?.[mesNum] || '',
       ultimoResponsable(e.uuid),
     ]);
   });
 
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet(data);
-  ws['!cols'] = [{wch:10},{wch:14},{wch:14},{wch:32},{wch:22},{wch:18},{wch:14},{wch:26}];
+  ws['!cols'] = [{wch:10},{wch:14},{wch:14},{wch:32},{wch:22},{wch:18},{wch:14},{wch:10},{wch:26}];
   XLSX.utils.book_append_sheet(wb, ws, 'Asignacion');
 
   const tecData = [['Tecnicos'], ...tecnicos.map(t => [t])];
@@ -2533,28 +2544,31 @@ async function exportPlantillaAsignacion(periodo) {
   // Build initial xlsx
   const ab = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
 
-  // Inyectar dataValidation: debe ir DESPUÉS de <sheetData> y ANTES de <pageMargins> según ECMA-376.
-  // Si lo insertamos justo antes de </worksheet> Excel marca el archivo como dañado.
+  // Inyectar dataValidation. Per ECMA-376 debe ir DESPUÉS de </sheetData>
+  // y ANTES de elementos posteriores como <ignoredErrors> (#28), <pageMargins> (#21), etc.
+  // SheetJS escribe <ignoredErrors> inmediatamente después de </sheetData>; si pegamos antes
+  // de </worksheet> queda 28→18→fin, lo cual Excel rechaza como archivo dañado.
+  // La inserción más robusta es justo después de </sheetData>.
   const zip = await JSZip.loadAsync(ab);
   const sheetPath = 'xl/worksheets/sheet1.xml';
   let xml = await zip.file(sheetPath).async('string');
   const lastRow = equipos.length + 1;
-  const tecLast = tecnicos.length + 1;
+  const tecLast = Math.max(2, tecnicos.length + 1);
   const validation =
     `<dataValidations count="1">` +
     `<dataValidation type="list" allowBlank="1" showInputMessage="1" showErrorMessage="1" ` +
-    `errorTitle="Responsable inválido" error="Elegí un técnico de la lista." ` +
-    `sqref="H2:H${lastRow}">` +
+    `errorTitle="Responsable invalido" error="Elegi un tecnico de la lista." ` +
+    `sqref="I2:I${lastRow}">` +
     `<formula1>Tecnicos!$A$2:$A$${tecLast}</formula1>` +
     `</dataValidation></dataValidations>`;
-  // Anclas válidas para insertar (en orden de preferencia, todas posteriores a dataValidations en el schema).
-  const anchors = ['<pageMargins', '<pageSetup', '<headerFooter', '<rowBreaks', '<colBreaks', '<drawing', '<legacyDrawing', '<tableParts', '</worksheet>'];
-  let inserted = false;
-  for (const a of anchors) {
-    const idx = xml.indexOf(a);
-    if (idx >= 0) { xml = xml.slice(0, idx) + validation + xml.slice(idx); inserted = true; break; }
+  if (!tecnicos.length) {
+    // Sin técnicos disponibles: no inyectamos validación (evitamos formula1 con rango inválido).
+  } else if (xml.includes('</sheetData>')) {
+    xml = xml.replace('</sheetData>', '</sheetData>' + validation);
+  } else {
+    // Fallback (no debería ocurrir con SheetJS)
+    xml = xml.replace('</worksheet>', validation + '</worksheet>');
   }
-  if (!inserted) throw new Error('No se pudo insertar la validación de datos en el XLSX.');
   zip.file(sheetPath, xml);
 
   const out = await zip.generateAsync({ type: 'blob' });
@@ -4893,6 +4907,7 @@ VIEWS.inv = {
     const meta = h('div.table-meta', '');
     const tbl = h('table.dt');
     tbl.innerHTML = `<thead><tr>
+      <th>ID</th>
       <th>Servicio</th>
       <th>Equipo</th>
       <th>Carpeta</th>
@@ -4934,7 +4949,7 @@ VIEWS.inv = {
       if (rendered >= current.length) sentinel.style.display = 'none';
       else sentinel.style.display = '';
     }
-    const sentinel = h('tr', { style:{} }, [ h('td', { colspan: 8, style:{textAlign:'center', color:'var(--ink-3)', padding:'10px', fontSize:'11.5px'} }, 'Cargando más…') ]);
+    const sentinel = h('tr', { style:{} }, [ h('td', { colspan: 9, style:{textAlign:'center', color:'var(--ink-3)', padding:'10px', fontSize:'11.5px'} }, 'Cargando más…') ]);
     tb.parentNode.appendChild(sentinel); // outside tbody (browser tolerates)
     const io = new IntersectionObserver(entries => entries.forEach(en => { if (en.isIntersecting && rendered < current.length) renderMore(); }), { rootMargin: '120px' });
 
@@ -4965,6 +4980,7 @@ function rowForEquipo(e) {
   const pill = e.esSlot
     ? h('span.pill.muted', 'Slot')
     : h(`span.pill.${ESTADO_PILL[e.estado]||''}`.trim(), [ h('span.dot'), ESTADO_LABEL[e.estado] || e.estado ]);
+  tr.appendChild(h('td.col-mono', { title: e.id != null && e.id !== '' ? String(e.id) : '' }, e.id != null && e.id !== '' ? String(e.id) : '—'));
   tr.appendChild(h('td.truncate', { title: e.servicio }, e.servicio || '—'));
   tr.appendChild(h('td', [
     h('div', e.nombre || '—'),
@@ -5581,7 +5597,7 @@ VIEWS.entregas = {
       title: 'Entregas',
       desc: meta
         ? `${periodoLabel(periodo)} · archivo ${meta.archivo} cargado ${fmt.rel(meta.fechaCarga)} · ${meta.matcheados} de ${meta.total} equipos${meta.sinMatch?.length ? ' · '+meta.sinMatch.length+' sin match' : ''}`
-        : `${periodoLabel(periodo)} · sin archivo mensual — usando "Responsable MP" del maestro`,
+        : `${periodoLabel(periodo)} · sin archivo de asignación — todos los equipos quedan en (sin asignar)`,
       actions: [
         { label:'Importar asignación', icon:'ti-file-spreadsheet', onclick: () => handleImportAsignacion(periodo) },
         { label:'Exportar plantilla',  icon:'ti-download', onclick: async () => {
@@ -5613,16 +5629,41 @@ VIEWS.entregas = {
       return b[1].length - a[1].length;
     });
 
-    // KPIs globales
+    // KPIs globales del período
     const totalAsignados = Array.from(groups.entries()).filter(([k]) => k !== '(sin asignar)').reduce((s,[,v]) => s + v.length, 0);
     const sinAsignar     = groups.get('(sin asignar)')?.length || 0;
     const tecCount       = tecnicos.filter(([k]) => k !== '(sin asignar)').length;
 
-    root.appendChild(h('div.kpi-grid', { style:{marginBottom:'16px'} }, [
+    // KPIs del mes (independientes de la asignación): conteo sobre TODOS los equipos activos
+    const equiposActivos = STATE.equipos.filter(e => !e.esSlot && e.estado !== 'DeBaja');
+    const conGrilla     = equiposActivos.filter(e => e.grilla?.[mesNum] === 'X' || e.grilla?.[mesNum] === 'R' || e.grilla?.[mesNum] === 'PM' || e.grilla?.[mesNum] === 'RA');
+    const programadas   = equiposActivos.filter(e => e.grilla?.[mesNum] === 'X' || e.grilla?.[mesNum] === 'R');
+    const ejecutadas    = programadas.filter(e => (e.historial||[]).some(h => h.mes === mesNum && h.resultado === 'SI'));
+    const causalizadas  = programadas.filter(e => (e.historial||[]).some(h => h.mes === mesNum && CAUSALES[h.resultado]));
+    const mpPendientes  = Math.max(0, programadas.length - ejecutadas.length - causalizadas.length);
+    const pctCumpl      = programadas.length ? Math.round(ejecutadas.length / programadas.length * 100) : null;
+
+    // Sección "Mes ${MESES[mesNum-1]}"
+    const secMes = h('div', { style:{marginBottom:'16px'} });
+    secMes.appendChild(h('h3', { style:{fontSize:'12px', textTransform:'uppercase', letterSpacing:'.05em', color:'var(--ink-3)', fontWeight:500, margin:'0 0 8px'} }, `Mes ${MESES[mesNum-1]} ${periodo.split('-')[0]}`));
+    secMes.appendChild(h('div.kpi-grid', [
+      kpiCard({ label: `Con marca en grilla`, value: fmt.number(conGrilla.length), onclick: () => Router.go('pmp', { modo:'mes', mes: mesNum }) }),
+      kpiCard({ label: 'Programadas (X/R)',   value: fmt.number(programadas.length) }),
+      kpiCard({ label: 'Ejecutadas (SI)',     value: pctCumpl != null ? `${fmt.number(ejecutadas.length)} (${pctCumpl}%)` : fmt.number(ejecutadas.length), kind: pctCumpl != null ? (pctCumpl >= 80 ? 'success' : pctCumpl >= 50 ? 'warning' : 'danger') : 'muted' }),
+      kpiCard({ label: 'Causalizadas',        value: fmt.number(causalizadas.length), kind: causalizadas.length ? 'warning' : 'muted' }),
+      kpiCard({ label: 'Pendientes',          value: fmt.number(mpPendientes), kind: mpPendientes > 0 ? 'danger' : 'success' }),
+    ]));
+    root.appendChild(secMes);
+
+    // Sección "Asignación"
+    const secAsig = h('div', { style:{marginBottom:'16px'} });
+    secAsig.appendChild(h('h3', { style:{fontSize:'12px', textTransform:'uppercase', letterSpacing:'.05em', color:'var(--ink-3)', fontWeight:500, margin:'0 0 8px'} }, 'Asignación de responsables'));
+    secAsig.appendChild(h('div.kpi-grid', [
       kpiCard({ label: 'Técnicos activos', value: fmt.number(tecCount), kind: tecCount ? 'info' : 'muted' }),
-      kpiCard({ label: 'Equipos asignados', value: fmt.number(totalAsignados), kind: 'success' }),
+      kpiCard({ label: 'Equipos asignados', value: fmt.number(totalAsignados), kind: totalAsignados ? 'success' : 'muted' }),
       kpiCard({ label: 'Sin asignar', value: fmt.number(sinAsignar), kind: sinAsignar ? 'danger' : 'muted', onclick: () => Router.go('entregas', { periodo, focus: '(sin asignar)' }) }),
     ]));
+    root.appendChild(secAsig);
 
     // Cards por técnico
     const wrap = h('div', { style:{display:'flex', flexDirection:'column', gap:'10px'} });
