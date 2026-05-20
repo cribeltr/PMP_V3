@@ -951,7 +951,7 @@ const NAV_ITEMS = [
   { id: 'inv',      label: 'Inventario', icon: 'ti-stethoscope' },
   { id: 'pmp',      label: 'PMP anual',  icon: 'ti-calendar-month' },
   { id: 'ciclos',   label: 'Ciclos correctivos', icon: 'ti-tools' },
-  { id: 'entregas', label: 'Entregas',   icon: 'ti-clipboard-list', soon: true },
+  { id: 'entregas', label: 'Entregas',   icon: 'ti-clipboard-list' },
   { id: 'tareas',   label: 'Tareas',     icon: 'ti-checks' },
   { id: 'reportes', label: 'Reportes',   icon: 'ti-report', soon: true },
   { id: 'agenda',   label: 'Agenda',     icon: 'ti-address-book', soon: true },
@@ -2004,6 +2004,11 @@ async function ensureXLSX() {
   while (typeof XLSX === 'undefined' && tries < 30) { await new Promise(r => setTimeout(r, 100)); tries++; }
   if (typeof XLSX === 'undefined') throw new Error('No se pudo cargar SheetJS (XLSX). Verificá la conexión.');
 }
+async function ensureJSZip() {
+  let tries = 0;
+  while (typeof JSZip === 'undefined' && tries < 30) { await new Promise(r => setTimeout(r, 100)); tries++; }
+  if (typeof JSZip === 'undefined') throw new Error('No se pudo cargar JSZip. Verificá la conexión.');
+}
 
 function pickFile(accept='.xlsx,.xlsm,.json') {
   return new Promise((resolve, reject) => {
@@ -2171,6 +2176,212 @@ function rowToEquipo(r, idx) {
     correctivos: [],
     pendientesIds: [],
   };
+}
+
+/* ============================================================
+   IMPORT · asignación mensual (.xlsx)
+   ============================================================ */
+async function importAsignacionMensual(file, opts={}) {
+  await ensureXLSX();
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type: 'array' });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
+
+  // Detect header row
+  let hr = -1;
+  for (let i = 0; i < Math.min(aoa.length, 20); i++) {
+    const row = aoa[i].map(c => normalize(c));
+    const hasResp = row.some(c => c.includes('responsable'));
+    const hasSerieOrInv = row.some(c => c.includes('serie') || c.includes('inventario'));
+    if (hasResp && hasSerieOrInv) { hr = i; break; }
+  }
+  if (hr < 0) throw new Error('No se detectó fila de encabezados (Responsable + Serie/Inventario).');
+
+  // Index columns
+  const idx = {};
+  aoa[hr].forEach((raw, i) => {
+    const c = normalize(raw);
+    if (c.includes('responsable')) idx.responsable = i;
+    else if (c.includes('serie')) idx.serie = i;
+    else if (c.includes('inventario')) idx.inventario = i;
+    else if (c.includes('carpeta')) idx.carpeta = i;
+  });
+
+  // Detect period from filename or use opts
+  const periodo = opts.mes && opts.anio
+    ? `${opts.anio}-${String(opts.mes).padStart(2,'0')}`
+    : detectarPeriodoArchivo(file.name) || `${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}`;
+
+  const [anio, mesStr] = periodo.split('-');
+  const mes = Number(mesStr);
+
+  // Build lookups
+  const bySerie = new Map();
+  const byInv   = new Map();
+  STATE.equipos.forEach(e => {
+    const s = normalize(e.serie);
+    const i = normalize(e.inventario);
+    if (s && s !== 'n/a') bySerie.set(s, e);
+    if (i && i !== 'n/a') byInv.set(i, e);
+  });
+
+  const rows = aoa.slice(hr + 1).filter(r => r.some(c => String(c).trim()));
+  const asign = { __meta: {
+    archivo: file.name,
+    fechaCarga: new Date().toISOString(),
+    mes, anio: Number(anio),
+    total: rows.length,
+    matcheados: 0,
+    sinMatch: [],
+    tecnicos: {},
+  }};
+
+  for (const r of rows) {
+    const resp = idx.responsable != null ? String(r[idx.responsable] || '').trim() : '';
+    if (!resp) continue;
+    const serie = idx.serie != null ? normalize(r[idx.serie]) : '';
+    const inv   = idx.inventario != null ? normalize(r[idx.inventario]) : '';
+    let eq = (serie && bySerie.get(serie)) || (inv && byInv.get(inv)) || null;
+    if (!eq) {
+      asign.__meta.sinMatch.push({ serie: r[idx.serie] || '', inventario: r[idx.inventario] || '', responsable: resp });
+      continue;
+    }
+    asign[eq.uuid] = resp;
+    asign.__meta.matcheados++;
+    asign.__meta.tecnicos[resp] = (asign.__meta.tecnicos[resp] || 0) + 1;
+  }
+
+  STATE.asignaciones[periodo] = asign;
+  persist('asignaciones');
+  return { periodo, ...asign.__meta };
+}
+
+function detectarPeriodoArchivo(name) {
+  const meses = {
+    enero:1,febrero:2,marzo:3,abril:4,mayo:5,junio:6,julio:7,agosto:8,septiembre:9,octubre:10,noviembre:11,diciembre:12,
+    ene:1,feb:2,mar:3,abr:4,may:5,jun:6,jul:7,ago:8,sep:9,oct:10,nov:11,dic:12,
+  };
+  const norm = normalize(name);
+  const yearM = norm.match(/20\d{2}/);
+  const year = yearM ? Number(yearM[0]) : new Date().getFullYear();
+  for (const [w, m] of Object.entries(meses)) {
+    if (norm.includes(w)) return `${year}-${String(m).padStart(2,'0')}`;
+  }
+  return null;
+}
+
+/* ============================================================
+   EXPORT · plantilla mensual (XLSX con validación de lista)
+   ============================================================ */
+async function exportPlantillaAsignacion(periodo) {
+  await ensureXLSX();
+  await ensureJSZip();
+  const equipos = STATE.equipos.filter(e => !e.esSlot && e.estado !== 'DeBaja');
+  const tecnicos = sugerirTecnicos();
+  const existing = STATE.asignaciones[periodo] || {};
+
+  const headers = ['Carpeta','N° Inventario','N° Serie','Equipo','Servicio','Familia','Frecuencia MP','Responsable'];
+  const data = [headers];
+  equipos.forEach(e => {
+    data.push([
+      e.carpeta ?? '',
+      e.inventario || '',
+      e.serie || '',
+      e.nombre || '',
+      e.servicio || '',
+      e.fam || '',
+      e.frecuencia || '',
+      existing[e.uuid] || '',
+    ]);
+  });
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(data);
+  ws['!cols'] = [{wch:10},{wch:14},{wch:14},{wch:32},{wch:22},{wch:18},{wch:14},{wch:26}];
+  XLSX.utils.book_append_sheet(wb, ws, 'Asignacion');
+
+  const tecData = [['Tecnicos'], ...tecnicos.map(t => [t])];
+  const wsT = XLSX.utils.aoa_to_sheet(tecData);
+  XLSX.utils.book_append_sheet(wb, wsT, 'Tecnicos');
+
+  // Build initial xlsx
+  const ab = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+
+  // Inject data validation via JSZip
+  const zip = await JSZip.loadAsync(ab);
+  const sheetPath = 'xl/worksheets/sheet1.xml';
+  let xml = await zip.file(sheetPath).async('string');
+  const lastRow = equipos.length + 1;
+  const tecLast = tecnicos.length + 1;
+  const validation =
+    `<dataValidations count="1">` +
+    `<dataValidation type="list" allowBlank="1" showInputMessage="1" showErrorMessage="1" ` +
+    `errorTitle="Responsable inválido" error="Elegí un técnico de la lista." ` +
+    `sqref="H2:H${lastRow}">` +
+    `<formula1>Tecnicos!$A$2:$A$${tecLast}</formula1>` +
+    `</dataValidation></dataValidations>`;
+  // Insert before </worksheet>
+  xml = xml.replace('</worksheet>', `${validation}</worksheet>`);
+  zip.file(sheetPath, xml);
+
+  // Hide the technicians sheet
+  let wbXml = await zip.file('xl/workbook.xml').async('string');
+  wbXml = wbXml.replace(/<sheet ([^/]*name="Tecnicos"[^/]*)\/>/, '<sheet $1 state="hidden"/>');
+  zip.file('xl/workbook.xml', wbXml);
+
+  const out = await zip.generateAsync({ type: 'blob' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(out);
+  a.download = `plantilla_asignacion_${periodo}.xlsx`;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+function sugerirTecnicos() {
+  const set = new Set();
+  // Desde asignaciones previas
+  Object.values(STATE.asignaciones || {}).forEach(per => {
+    if (!per || typeof per !== 'object') return;
+    Object.entries(per).forEach(([k,v]) => { if (k !== '__meta' && v && typeof v === 'string') set.add(v); });
+  });
+  // Desde maestro
+  STATE.equipos.forEach(e => { if (e.responsableMaster) set.add(e.responsableMaster); });
+  // Desde ejecutores históricos
+  EQ.ejecutores().forEach(n => set.add(n));
+  return Array.from(set).sort((a,b) => a.localeCompare(b,'es'));
+}
+
+/* ============================================================
+   QUERY · período activo y agrupación por técnico
+   ============================================================ */
+function listaPeriodos() {
+  return Object.keys(STATE.asignaciones || {})
+    .filter(k => k !== '__meta' && /^\d{4}-\d{2}$/.test(k))
+    .sort()
+    .reverse();
+}
+
+function periodoActual() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+}
+
+function periodoLabel(p) {
+  if (!p) return '—';
+  const [y, m] = p.split('-');
+  return `${MESES[Number(m)-1]} ${y}`;
+}
+
+function agruparPorTecnico(periodo) {
+  const asign = STATE.asignaciones[periodo] || {};
+  const groups = new Map();
+  const equiposActivos = STATE.equipos.filter(e => !e.esSlot && e.estado !== 'DeBaja');
+  equiposActivos.forEach(e => {
+    const resp = asign[e.uuid] || '(sin asignar)';
+    if (!groups.has(resp)) groups.set(resp, []);
+    groups.get(resp).push(e);
+  });
+  return groups;
 }
 
 /** Merge updates from master file without destroying historial / correctivos / eventos / R-marks. */
@@ -4016,7 +4227,223 @@ VIEWS.ciclos = {
   },
 };
 
-VIEWS.entregas = soonView('Entregas pendientes', 'Asignación mensual por técnico: It.4.');
+VIEWS.entregas = {
+  title: 'Entregas',
+  render(root, params={}) {
+    const periodos = listaPeriodos();
+    const periodo = params.periodo || periodos[0] || periodoActual();
+    const meta = STATE.asignaciones[periodo]?.__meta;
+
+    // Header
+    const periodoSel = selectCtl(
+      periodos.length
+        ? periodos.map(p => ({ value: p, label: periodoLabel(p) }))
+        : [{ value: periodo, label: periodoLabel(periodo) }],
+      periodo,
+      { onchange: (e) => Router.go('entregas', { periodo: e.target.value }) },
+    );
+
+    root.appendChild(viewHeader({
+      title: 'Entregas',
+      desc: meta
+        ? `${periodoLabel(periodo)} · cargado ${fmt.rel(meta.fechaCarga)} · ${meta.matcheados} de ${meta.total} equipos asignados${meta.sinMatch?.length ? ' · '+meta.sinMatch.length+' sin match' : ''}`
+        : `${periodoLabel(periodo)} · sin asignación cargada todavía`,
+      actions: [
+        { label:'Importar asignación', icon:'ti-file-spreadsheet', onclick: () => handleImportAsignacion(periodo) },
+        { label:'Exportar plantilla',  icon:'ti-download', onclick: async () => {
+          try { await exportPlantillaAsignacion(periodo); UI.toast('Plantilla descargada.', 'success'); }
+          catch(e) { bus.emit('error', e); }
+        } },
+      ],
+    }));
+
+    // Period switch
+    const periodBar = h('div', { style:{display:'flex', gap:'8px', alignItems:'center', marginBottom:'14px'} }, [
+      h('span', { style:{ fontSize:'12px', color:'var(--ink-3)' } }, 'Período:'),
+      periodoSel,
+      meta?.sinMatch?.length ? h('button.btn.sm.ghost', { onclick: () => mostrarSinMatch(meta) }, [ h('i.ti.ti-alert-triangle'), `${meta.sinMatch.length} sin match` ]) : null,
+    ]);
+    root.appendChild(periodBar);
+
+    if (!STATE.equipos.length) {
+      root.appendChild(emptyState({ icon:'ti-stethoscope', title:'Sin inventario', desc:'Cargá el maestro primero.' }));
+      return;
+    }
+
+    const groups = agruparPorTecnico(periodo);
+    const mesNum = Number(periodo.split('-')[1]);
+    const tecnicos = Array.from(groups.entries()).sort((a,b) => {
+      // (sin asignar) al final
+      if (a[0] === '(sin asignar)') return 1;
+      if (b[0] === '(sin asignar)') return -1;
+      return b[1].length - a[1].length;
+    });
+
+    // KPIs globales
+    const totalAsignados = Array.from(groups.entries()).filter(([k]) => k !== '(sin asignar)').reduce((s,[,v]) => s + v.length, 0);
+    const sinAsignar     = groups.get('(sin asignar)')?.length || 0;
+    const tecCount       = tecnicos.filter(([k]) => k !== '(sin asignar)').length;
+
+    root.appendChild(h('div.kpi-grid', { style:{marginBottom:'16px'} }, [
+      kpiCard({ label: 'Técnicos activos', value: fmt.number(tecCount), kind: tecCount ? 'info' : 'muted' }),
+      kpiCard({ label: 'Equipos asignados', value: fmt.number(totalAsignados), kind: 'success' }),
+      kpiCard({ label: 'Sin asignar', value: fmt.number(sinAsignar), kind: sinAsignar ? 'danger' : 'muted', onclick: () => Router.go('entregas', { periodo, focus: '(sin asignar)' }) }),
+    ]));
+
+    // Cards por técnico
+    const wrap = h('div', { style:{display:'flex', flexDirection:'column', gap:'10px'} });
+    tecnicos.forEach(([resp, equipos]) => {
+      wrap.appendChild(renderCardTecnico(resp, equipos, mesNum, periodo, params.focus === resp));
+    });
+    root.appendChild(wrap);
+  },
+};
+
+function renderCardTecnico(responsable, equipos, mes, periodo, expandedDefault=false) {
+  const programadas = equipos.filter(e => e.grilla?.[mes] === 'X' || e.grilla?.[mes] === 'R');
+  const ejecutadas  = programadas.filter(e => (e.historial||[]).some(h => h.mes === mes && h.resultado === 'SI'));
+  const causalizadas = programadas.filter(e => (e.historial||[]).some(h => h.mes === mes && CAUSALES[h.resultado]));
+  const pendientes  = programadas.length - ejecutadas.length - causalizadas.length;
+  const pct = programadas.length ? Math.round(ejecutadas.length / programadas.length * 100) : null;
+
+  const card = h('div.card');
+  const head = h('div', { style:{display:'flex', alignItems:'center', gap:'10px', cursor:'pointer'} });
+  let expanded = expandedDefault;
+  const chev = h('i.ti', { class:'ti ti-chevron-' + (expanded?'down':'right'), style:{color:'var(--ink-3)'} });
+  head.appendChild(chev);
+  head.appendChild(h('div', { style:{flex:1} }, [
+    h('div', { style:{fontWeight:500, fontSize:'14px'} }, responsable),
+    h('div', { style:{color:'var(--ink-3)', fontSize:'11.5px', marginTop:'2px'} }, [
+      `${equipos.length} equipos`,
+      programadas.length ? ` · ${programadas.length} programados ${MESES[mes-1]}` : '',
+      pct != null ? ` · cumplimiento ${pct}%` : '',
+    ].join('')),
+  ]));
+  // KPI pills
+  const pills = h('div', { style:{display:'flex', gap:'4px', flexWrap:'wrap'} });
+  if (programadas.length) pills.appendChild(h('span.pill', `${programadas.length} programadas`));
+  if (ejecutadas.length)  pills.appendChild(h('span.pill.success', `${ejecutadas.length} ejecutadas`));
+  if (causalizadas.length) pills.appendChild(h('span.pill.warning', `${causalizadas.length} causalizadas`));
+  if (pendientes > 0)     pills.appendChild(h('span.pill.danger', `${pendientes} pendientes`));
+  head.appendChild(pills);
+  card.appendChild(head);
+
+  const list = h('div', { style:{display: expanded?'block':'none', marginTop:'12px', borderTop:'.5px solid var(--line)', paddingTop:'12px'} });
+  card.appendChild(list);
+
+  function renderEquipos() {
+    list.innerHTML = '';
+    const tbl = h('table.dt');
+    tbl.innerHTML = `<thead><tr>
+      <th>Equipo</th><th>Servicio</th><th>Grilla ${MESES[mes-1]}</th><th>Estado MP ${MESES[mes-1]}</th><th>Estado equipo</th><th></th>
+    </tr></thead>`;
+    const tb = h('tbody');
+    equipos.slice().sort((a,b) => {
+      // Pendientes primero
+      const score = (e) => {
+        const prog = e.grilla?.[mes] === 'X' || e.grilla?.[mes] === 'R';
+        const ejec = (e.historial||[]).some(h => h.mes === mes && h.resultado === 'SI');
+        const causal = (e.historial||[]).some(h => h.mes === mes && CAUSALES[h.resultado]);
+        if (prog && !ejec && !causal) return 0; // pendientes
+        if (prog && causal) return 1;
+        if (prog && ejec) return 2;
+        return 3;
+      };
+      return score(a) - score(b);
+    }).forEach(e => {
+      const prog = e.grilla?.[mes];
+      const lastMP = (e.historial||[]).filter(h => h.mes === mes).sort((a,b) => new Date(b.fechaEvento||b.fecha||0) - new Date(a.fechaEvento||a.fecha||0))[0];
+      const tr = h('tr', { onclick: () => openFicha(e.uuid) }, [
+        h('td', [ h('div', e.nombre), h('div', { style:{color:'var(--ink-3)', fontSize:'11.5px'} }, `${e.serie||''} · ${e.inventario||''}`) ]),
+        h('td.truncate', e.servicio || '—'),
+        h('td', prog ? h(`span.pill.${prog==='X'?'info':prog==='R'?'warning':'muted'}`, prog) : '—'),
+        h('td', lastMP ? resultadoPill(lastMP.resultado) : (prog ? h('span.pill.danger','pendiente') : '—')),
+        h('td', h(`span.pill.${ESTADO_PILL[e.estado]||''}`.trim(), ESTADO_LABEL[e.estado] || e.estado)),
+        h('td', h('button.btn.sm', { onclick: (ev)=> { ev.stopPropagation(); abrirModalRegistrarMP(e, { mes }); } }, [ h('i.ti.ti-edit'), 'MP' ])),
+      ]);
+      tb.appendChild(tr);
+    });
+    tbl.appendChild(tb);
+    list.appendChild(tbl);
+  }
+  if (expanded) renderEquipos();
+
+  head.addEventListener('click', () => {
+    expanded = !expanded;
+    list.style.display = expanded ? 'block' : 'none';
+    chev.className = 'ti ti-chevron-' + (expanded ? 'down' : 'right');
+    if (expanded && list.children.length === 0) renderEquipos();
+  });
+
+  return card;
+}
+
+function mostrarSinMatch(meta) {
+  UI.modal({
+    title: 'Filas sin match',
+    sub: `${meta.sinMatch.length} filas del archivo no coinciden con ningún equipo del inventario`,
+    size: 'md',
+    content: (body) => {
+      const tbl = h('table.dt');
+      tbl.innerHTML = `<thead><tr><th>Serie</th><th>Inventario</th><th>Responsable</th></tr></thead>`;
+      const tb = h('tbody');
+      meta.sinMatch.forEach(r => {
+        tb.appendChild(h('tr', [
+          h('td.col-mono', r.serie || '—'),
+          h('td.col-mono', r.inventario || '—'),
+          h('td', r.responsable),
+        ]));
+      });
+      tbl.appendChild(tb);
+      body.appendChild(h('p', { style:{margin:'0 0 12px 0', color:'var(--ink-3)', fontSize:'12px'} },
+        'Revisá que la Serie/Inventario coincida con el maestro, o re-importá la asignación luego de actualizar el maestro.'));
+      body.appendChild(h('div.table-wrap', [ tbl ]));
+    },
+  });
+}
+
+async function handleImportAsignacion(periodoSugerido) {
+  try {
+    const file = await pickFile('.xlsx');
+    if (!file) return;
+    // If filename has month, use it; else ask
+    const detected = detectarPeriodoArchivo(file.name);
+    let mes, anio;
+    if (detected) {
+      [anio, mes] = detected.split('-').map(Number);
+    } else {
+      const askResult = await askPeriodoModal(periodoSugerido);
+      if (!askResult) return;
+      mes = askResult.mes; anio = askResult.anio;
+    }
+    UI.toast(`Procesando ${file.name}…`, 'info', { duration: 2500 });
+    const result = await importAsignacionMensual(file, { mes, anio });
+    UI.toast(`Período ${periodoLabel(result.periodo)}: ${result.matcheados}/${result.total} matcheados${result.sinMatch?.length ? ' · '+result.sinMatch.length+' sin match' : ''}.`, 'success', { duration: 6500 });
+    Router.go('entregas', { periodo: result.periodo });
+  } catch (e) { bus.emit('error', e); }
+}
+
+function askPeriodoModal(periodoSugerido) {
+  return new Promise((resolve) => {
+    const [yDef, mDef] = (periodoSugerido || periodoActual()).split('-');
+    let mes = Number(mDef), anio = Number(yDef);
+    UI.modal({
+      title: 'Confirmar período',
+      sub: 'No detecté mes/año en el nombre del archivo.',
+      size: 'sm',
+      content: (body) => {
+        body.appendChild(row('1fr 1fr', [
+          field('Mes', selectCtl(MESES.map((n,i)=>({value:String(i+1),label:n})), String(mes), { onchange:(e)=> mes = Number(e.target.value) })),
+          field('Año', inputCtl({ type:'number', min:2020, max:2100, value: anio, oninput:(e)=> anio = Number(e.target.value)||anio })),
+        ]));
+      },
+      footer: (f, { close }) => {
+        f.appendChild(h('button.btn.ghost', { onclick: () => { close(); resolve(null); } }, 'Cancelar'));
+        f.appendChild(h('button.btn.primary', { onclick: () => { close(); resolve({ mes, anio }); } }, 'Confirmar'));
+      },
+    });
+  });
+}
 
 VIEWS.tareas = {
   title: 'Tareas',
@@ -4199,9 +4626,10 @@ const CMDK = (() => {
     }
 
     const actions = [
-      { group:'Acciones', label:'Importar maestro', icon:'ti-file-spreadsheet', run: handleImportMaestro },
-      { group:'Acciones', label:'Descargar backup', icon:'ti-database-export', run: exportBackup },
-      { group:'Acciones', label:'Restaurar backup', icon:'ti-database-import', run: importBackup },
+      { group:'Acciones', label:'Importar maestro',         icon:'ti-file-spreadsheet', run: handleImportMaestro },
+      { group:'Acciones', label:'Importar asignación mensual', icon:'ti-clipboard-text', run: () => handleImportAsignacion() },
+      { group:'Acciones', label:'Descargar backup',         icon:'ti-database-export', run: exportBackup },
+      { group:'Acciones', label:'Restaurar backup',         icon:'ti-database-import', run: importBackup },
       { group:'Acciones', label:'Alternar tema claro/oscuro', icon:'ti-contrast-2', run: () => Theme.toggle() },
     ];
     const navs = NAV_ITEMS.map(it => ({

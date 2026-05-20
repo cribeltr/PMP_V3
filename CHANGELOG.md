@@ -1,5 +1,28 @@
 # Changelog
 
+## It.4 — Entregas + asignación mensual
+
+- **Importación de asignación mensual** (.xlsx): detecta encabezados
+  (Responsable + Serie/Inventario), matchea por Serie y por Inventario,
+  detecta período a partir del nombre del archivo (mes en castellano +
+  año) o pide confirmación si no lo detecta. Almacena bajo
+  `pmp.v3.asignaciones["YYYY-MM"]` con metadatos (archivo, fechaCarga,
+  matcheados, sinMatch[]).
+- **Vista Entregas**: selector de período, KPIs (técnicos activos,
+  asignados, sin asignar), tarjetas colapsables por técnico con
+  cumplimiento del mes (programadas / ejecutadas / causalizadas /
+  pendientes) y tabla expandible de equipos con botón rápido a
+  Registrar MP.
+- **Modal "sin match"**: lista las filas del archivo que no coinciden
+  con el inventario actual para facilitar correcciones.
+- **Exportar plantilla** (.xlsx): genera planilla mensual con columnas
+  Carpeta · Inventario · Serie · Equipo · Servicio · Familia ·
+  Frecuencia · Responsable; pre-llena el responsable existente y
+  agrega data validation tipo lista (dropdown) en la columna
+  Responsable apuntando a una hoja oculta `Tecnicos` poblada con
+  asignaciones previas + ejecutores históricos + maestros.
+- Acción accesible desde Ctrl+K (Importar asignación mensual).
+
 ## It.3 — Ciclo correctivo · gestión por eslabón
 
 - **Ciclo Viewer**: modal grande con stepper horizontal en el header y
