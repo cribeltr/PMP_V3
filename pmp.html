@@ -1426,7 +1426,7 @@ const MP = {
   /**
    * Registra una MP en el equipo.
    * @param data { fechaEvento (ISO), mes, resultado, ejecutor, obs, estadoFinal, tipoBaja, motivoCambioEjecutor }
-   * @returns { equipo, mp, needsVinculacion: 'C2'|'C3'|null }
+   * @returns { equipo, mp, needsVinculacion: 'C2'|'C3'|'SI_NO_OP'|null }
    */
   register(equipoUuid, data) {
     const e = EQ.byUuid(equipoUuid);
@@ -1476,7 +1476,8 @@ const MP = {
     persist('equipos');
     let needsVinculacion = null;
     if (mp.resultado === 'C2') needsVinculacion = 'C2';
-    if (mp.resultado === 'C3') needsVinculacion = 'C3';
+    else if (mp.resultado === 'C3') needsVinculacion = 'C3';
+    else if (mp.resultado === 'SI' && mp.estadoFinal === 'NoOperativo') needsVinculacion = 'SI_NO_OP';
     return { equipo: e, mp, needsVinculacion };
   },
 
@@ -1500,7 +1501,14 @@ const MP = {
     });
     pushEvento(e, { tipo: 'MP-edicion', ts: new Date().toISOString(), payload: { mpId, cambios: data } });
     persist('equipos');
-    return { equipo: e, mp: prev };
+    // Espejar la lógica de needsVinculacion de register, salvo que ya estuviera vinculada.
+    let needsVinculacion = null;
+    if (!prev.correctivoUuid) {
+      if (prev.resultado === 'C2') needsVinculacion = 'C2';
+      else if (prev.resultado === 'C3') needsVinculacion = 'C3';
+      else if (prev.resultado === 'SI' && prev.estadoFinal === 'NoOperativo') needsVinculacion = 'SI_NO_OP';
+    }
+    return { equipo: e, mp: prev, needsVinculacion };
   },
 };
 
@@ -2149,19 +2157,29 @@ function alertasDeEquipo(equipo) {
     }
   }
 
-  // C2/C3 registrada sin vinculación al ciclo (estado no se aplicó)
+  // MP sin vincular: C2 / C3 / SI con estadoFinal=NoOperativo (caso bug A — R5).
+  // Se considera "sin vincular" si la MP no tiene correctivoUuid y, para el caso
+  // SI_NO_OP, además fue marcada explícitamente con `sinVincular: true`.
   hs.forEach(h => {
+    const dias = fmt.daysSince(h.fechaEvento || h.fecha);
+    if (dias == null || dias > 60) return;
+    let necesita = null;
     if ((h.resultado === 'C2' || h.resultado === 'C3') && !h.correctivoUuid) {
-      const dias = fmt.daysSince(h.fechaEvento || h.fecha);
-      if (dias != null && dias <= 60) {
-        out.push({
-          kind: 'warning',
-          icon: 'ti-link-off',
-          text: `Causal ${h.resultado} de ${fmt.date(h.fechaEvento || h.fecha)} sin vincular — el equipo debería estar ${h.resultado === 'C2' ? 'en Servicio Técnico' : 'No Operativo'}.`,
-          action: { label: 'Vincular ahora', handler: () => abrirModalVinculacion(equipo, h) },
-        });
-      }
+      necesita = h.resultado;
+    } else if (h.resultado === 'SI' && h.estadoFinal === 'NoOperativo' && h.sinVincular && !h.correctivoUuid) {
+      necesita = 'SI_NO_OP';
     }
+    if (!necesita) return;
+    const estadoEsperado = (necesita === 'C2') ? 'en Servicio Técnico' : 'No Operativo';
+    const titulo = necesita === 'SI_NO_OP'
+      ? `MP del ${fmt.date(h.fechaEvento || h.fecha)} con estado No Operativo sin vincular a ciclo — corresponde abrir o asociar uno.`
+      : `Causal ${h.resultado} de ${fmt.date(h.fechaEvento || h.fecha)} sin vincular — el equipo debería estar ${estadoEsperado}.`;
+    out.push({
+      kind: 'warning',
+      icon: 'ti-link-off',
+      text: titulo,
+      action: { label: 'Vincular ahora', handler: () => abrirModalVinculacion(equipo, h) },
+    });
   });
 
   // Ciclo con SIGEM pendiente
@@ -4080,8 +4098,9 @@ function abrirModalRegistrarMP(equipo, opts={}) {
           else         res = MP.register(equipo.uuid, payload);
           close('save');
           if (res.needsVinculacion === 'C2') abrirModalVinculacionC2(res.equipo, res.mp);
-          else if (res.needsVinculacion === 'C3') abrirModalVinculacionC3(res.equipo, res.mp);
-          else UI.toast('MP registrada.', 'success');
+          else if (res.needsVinculacion === 'C3') abrirModalVinculacionC3(res.equipo, res.mp, { motivo:'C3' });
+          else if (res.needsVinculacion === 'SI_NO_OP') abrirModalVinculacionC3(res.equipo, res.mp, { motivo:'SI_NO_OP' });
+          else UI.toast(editing ? 'MP actualizada.' : 'MP registrada.', 'success');
           if (STATE.view === 'pmp' || STATE.view === 'dash' || STATE.view === 'inv') Router.go(STATE.view, STATE.viewParams);
           opts.onSaved?.(res);
         } catch (e) { bus.emit('error', e); }
@@ -4092,10 +4111,19 @@ function abrirModalRegistrarMP(equipo, opts={}) {
 
 function abrirModalVinculacion(equipo, mp) {
   if (mp.resultado === 'C2') return abrirModalVinculacionC2(equipo, mp);
-  if (mp.resultado === 'C3') return abrirModalVinculacionC3(equipo, mp);
+  if (mp.resultado === 'C3') return abrirModalVinculacionC3(equipo, mp, { motivo:'C3' });
+  if (mp.resultado === 'SI' && mp.estadoFinal === 'NoOperativo') return abrirModalVinculacionC3(equipo, mp, { motivo:'SI_NO_OP' });
 }
 
-function abrirModalVinculacionC3(equipo, mp) {
+/**
+ * Modal de vinculación a ciclo correctivo. Cubre dos motivos:
+ *  - motivo:'C3'        → causal C3 estándar
+ *  - motivo:'SI_NO_OP'  → MP ejecutada (SI) pero estadoFinal=NoOperativo
+ * La lógica de negocio y las 3 opciones (existente / nuevo con folio / pendiente clínico)
+ * son las mismas; solo cambian textos y el tipo de evento al vincular.
+ */
+function abrirModalVinculacionC3(equipo, mp, opts={}) {
+  const motivo = opts.motivo || 'C3';
   const ciclosAbiertos = (equipo.correctivos || []).filter(c => c.abierto);
   let modo = ciclosAbiertos.length ? 'existente' : 'nuevo';
   let snap = {
@@ -4109,14 +4137,26 @@ function abrirModalVinculacionC3(equipo, mp) {
     diasVencimientoPendiente: 3,
   };
 
+  const tituloModal = motivo === 'SI_NO_OP' ? 'Vincular MP con estado No Operativo' : 'Vincular causal C3';
+  const subModal    = motivo === 'SI_NO_OP'
+    ? 'La MP se ejecutó pero el equipo quedó No Operativo. Vincularlo a un ciclo correctivo mantiene la trazabilidad.'
+    : 'El equipo pasa a No Operativo al confirmar.';
+  const introTexto  = motivo === 'SI_NO_OP'
+    ? 'Registraste una MP que se ejecutó (SI) pero dejaste el equipo No Operativo. Esto suele pasar cuando durante la MP se detecta una falla que requiere reparación. Vinculalo a un ciclo correctivo para no perder la trazabilidad.'
+    : 'C3 = equipo a la espera de repuestos. Hay que ligarlo a un ciclo correctivo para no perder trazabilidad.';
+  const cancelToast = motivo === 'SI_NO_OP'
+    ? 'MP registrada — equipo No Operativo sin vincular a ciclo. Aparecerá un aviso en la ficha hasta que vincules.'
+    : 'Causal C3 registrada — equipo No Operativo sin vincular a ciclo. Aparecerá un aviso en la ficha hasta que vincules.';
+  const tipoEvento  = motivo === 'SI_NO_OP' ? 'MP-SI-NOOP-VINCULADA' : 'CAUSAL-VINCULADA';
+  const labelOk     = motivo === 'SI_NO_OP' ? 'MP vinculada al ciclo en curso.' : 'Causal C3 vinculada al ciclo en curso.';
+
   UI.modal({
-    title: 'Vincular causal C3',
-    sub: 'El equipo pasa a No Operativo al confirmar.',
+    title: tituloModal,
+    sub: subModal,
     size: 'md',
     critical: false,
     content: (body, { close }) => {
-      body.appendChild(h('p', { style:{margin:'0 0 14px 0', color:'var(--ink-2)', fontSize:'12.5px'} },
-        'C3 = equipo a la espera de repuestos. Hay que ligarlo a un ciclo correctivo para no perder trazabilidad.'));
+      body.appendChild(h('p', { style:{margin:'0 0 14px 0', color:'var(--ink-2)', fontSize:'12.5px'} }, introTexto));
 
       const opts = h('div', { style:{ display:'flex', flexDirection:'column', gap:'6px', marginBottom:'14px' } });
       function radio(value, label, desc) {
@@ -4184,7 +4224,10 @@ function abrirModalVinculacionC3(equipo, mp) {
     },
     footer: (f, { close }) => {
       f.appendChild(h('button.btn.ghost', { onclick: () => {
-        UI.toast('Causal C3 registrada sin vincular — el equipo queda en su estado anterior. Aparecerá un aviso en la ficha.', 'warning', { duration: 7000 });
+        // Marcar la MP como "sin vincular" para que el banner amarillo de la ficha lo muestre.
+        mp.sinVincular = true;
+        persist('equipos');
+        UI.toast(cancelToast, 'warning', { duration: 7000 });
         close('cancel');
       } }, 'Vincular después'));
       f.appendChild(h('button.btn.primary', { onclick: () => {
@@ -4194,11 +4237,12 @@ function abrirModalVinculacionC3(equipo, mp) {
             const c = (equipo.correctivos||[]).find(x => x.uuid === snap.cicloUuidExistente);
             if (!c) throw new Error('Ciclo no encontrado.');
             mp.correctivoUuid = c.uuid;
+            mp.sinVincular = false;
             equipo.estado = 'NoOperativo';
             equipo.estadoDesde = mp.fechaEvento || mp.fecha;
-            pushEvento(equipo, { tipo:'CAUSAL-VINCULADA', ts: mp.fechaEvento || mp.fecha, payload: { mpId: mp.id, causal: mp.resultado, cicloUuid: c.uuid } });
+            pushEvento(equipo, { tipo: tipoEvento, ts: mp.fechaEvento || mp.fecha, payload: { mpId: mp.id, causal: mp.resultado, estadoFinal: mp.estadoFinal, cicloUuid: c.uuid, motivo } });
             persist('equipos');
-            UI.toast(`Causal C3 vinculada al ciclo en curso.`, 'success');
+            UI.toast(labelOk, 'success');
           } else if (modo === 'nuevo') {
             const fechaISO = isoFromDateInput(snap.fechaEvento);
             if (!fechaISO) throw new Error('Fecha inválida.');
@@ -4214,21 +4258,27 @@ function abrirModalVinculacionC3(equipo, mp) {
               causalLink: { mpId: mp.id, causal: mp.resultado },
             });
             mp.correctivoUuid = ciclo.uuid;
+            mp.sinVincular = false;
+            pushEvento(equipo, { tipo: tipoEvento, ts: fechaISO, payload: { mpId: mp.id, causal: mp.resultado, estadoFinal: mp.estadoFinal, cicloUuid: ciclo.uuid, folioSigem: snap.folioSigem.trim(), motivo } });
             persist('equipos');
-            UI.toast(`Ciclo creado y causal C3 vinculada (folio ${snap.folioSigem}).`, 'success');
+            UI.toast(motivo === 'SI_NO_OP'
+              ? `Ciclo creado y MP vinculada (folio ${snap.folioSigem}).`
+              : `Ciclo creado y causal C3 vinculada (folio ${snap.folioSigem}).`, 'success');
           } else if (modo === 'pendiente') {
             const fechaISO = isoFromDateInput(snap.fechaEvento);
             if (!fechaISO) throw new Error('Fecha inválida.');
             const vence = addBusinessDays(new Date(), snap.diasVencimientoPendiente || 3).toISOString();
+            const descCorta = (motivo === 'SI_NO_OP' ? 'MP ejecutada con equipo No Operativo' : `Causal ${mp.resultado}`);
             const p = PENDIENTE.crear({
               tipo: 'solicitud-clinico',
-              descripcion: `Solicitar al servicio clínico generar SIGEM para ${equipo.nombre}: ${snap.descripcion || mp.obs || 'falla equipo'}`,
+              descripcion: `Solicitar al servicio clínico generar SIGEM para ${equipo.nombre}: ${snap.descripcion || mp.obs || descCorta}`,
               equipoUuid: equipo.uuid,
               asignado: snap.responsable,
               vence,
-              meta: { mpId: mp.id, causal: mp.resultado, fechaProblema: fechaISO, deteccion: snap.deteccion },
+              meta: { mpId: mp.id, causal: mp.resultado, estadoFinal: mp.estadoFinal, fechaProblema: fechaISO, deteccion: snap.deteccion, motivo },
             });
             mp.pendienteVinculadoId = p.id;
+            mp.sinVincular = false;
             equipo.estado = 'NoOperativo';
             equipo.estadoDesde = fechaISO;
             pushEvento(equipo, { tipo:'CAUSAL-PENDIENTE-CLINICO', ts: fechaISO, payload: { mpId: mp.id, causal: mp.resultado, pendienteId: p.id } });
@@ -5760,7 +5810,7 @@ function renderFichaTab(id, e) {
           title:'Abrir en Pendientes',
           onclick: () => {
             UI_PEND.focusId = p.id;
-            UI_PEND.filtros = { estado:'', asignado:'' };   // limpiar filtros para asegurar que aparezca
+            UI_PEND.filtros = { estado:'', asignado:'', desde:'', hasta:'' };   // limpiar filtros para asegurar que aparezca
             // Cerrar el modal de ficha si está abierto.
             const modals = document.querySelectorAll('#modals .backdrop');
             modals.forEach(m => { try { m.querySelector('.modal .close')?.click(); } catch {} });
@@ -6311,11 +6361,16 @@ function askPeriodoModal(periodoSugerido) {
 
 // Estado UI volátil para la vista Pendientes (filtros + foco al navegar desde otras vistas).
 const UI_PEND = {
-  filtros: { estado: '', asignado: '' },
+  filtros: { estado: '', asignado: '', desde: '', hasta: '' },
   focusId: null,
   // Tracks which cards are expanded (Set of ids).
   expanded: new Set(),
 };
+
+function pendFiltrosActivos() {
+  const f = UI_PEND.filtros;
+  return !!(f.estado || f.asignado || f.desde || f.hasta);
+}
 
 VIEWS.tareas = {
   title: 'Pendientes',
@@ -6338,41 +6393,95 @@ VIEWS.tareas = {
       return;
     }
 
-    // === Filtros ===
+    // === Filtros (estado · responsable · rango de fechas de compromiso) ===
     const filtBar = h('div', { style:{display:'flex', gap:'8px', alignItems:'center', flexWrap:'wrap', marginBottom:'12px'} });
     const selEstado = selectCtl(
       [{ value:'', label:'Todos los estados' }, ...ESTADOS_PENDIENTE.map(e => ({ value:e, label: ESTADO_PENDIENTE_LABEL[e] }))],
       UI_PEND.filtros.estado,
       { onchange: (e) => { UI_PEND.filtros.estado = e.target.value; refresh(); } },
     );
+    // Responsable: "Todos" + "(sin asignar)" + TECNICOS_OFICIALES
     const selAsig = selectCtl(
-      [{ value:'', label:'Todos los responsables' }, ...TECNICOS_OFICIALES.map(t => ({ value:t, label:t }))],
+      [
+        { value:'', label:'Todos los responsables' },
+        { value:'__SIN_ASIGNAR__', label:'(sin asignar)' },
+        ...TECNICOS_OFICIALES.map(t => ({ value:t, label:t })),
+      ],
       UI_PEND.filtros.asignado,
       { onchange: (e) => { UI_PEND.filtros.asignado = e.target.value; refresh(); } },
     );
-    const btnLimpiar = h('button.btn.ghost.sm', { onclick: () => {
-      UI_PEND.filtros = { estado:'', asignado:'' };
-      selEstado.value = ''; selAsig.value = '';
-      refresh();
-    } }, [ h('i.ti.ti-x'), 'Limpiar filtros' ]);
+    // Rango de fechas de compromiso
+    const inpDesde = h('input.input', { type:'date', value: UI_PEND.filtros.desde, style:{maxWidth:'150px'},
+      onchange:(e) => { UI_PEND.filtros.desde = e.target.value; refresh(); } });
+    const inpHasta = h('input.input', { type:'date', value: UI_PEND.filtros.hasta, style:{maxWidth:'150px'},
+      onchange:(e) => { UI_PEND.filtros.hasta = e.target.value; refresh(); } });
+    const btnLimpiarFechas = h('button.btn.icon.ghost', {
+      title:'Limpiar rango de fechas',
+      style:{display: (UI_PEND.filtros.desde || UI_PEND.filtros.hasta) ? '' : 'none'},
+      onclick: () => {
+        UI_PEND.filtros.desde = '';
+        UI_PEND.filtros.hasta = '';
+        inpDesde.value = ''; inpHasta.value = '';
+        refresh();
+      },
+    }, [ h('i.ti.ti-x', { style:{fontSize:'13px'} }) ]);
+    const fechasGroup = h('div', { style:{display:'flex', alignItems:'center', gap:'4px'} }, [
+      h('span', { style:{fontSize:'11px', color:'var(--ink-3)'} }, 'Compromiso:'),
+      h('span', { style:{fontSize:'11px', color:'var(--ink-3)'} }, 'desde'),
+      inpDesde,
+      h('span', { style:{fontSize:'11px', color:'var(--ink-3)'} }, 'hasta'),
+      inpHasta,
+      btnLimpiarFechas,
+    ]);
+
+    const btnLimpiarTodo = h('button.btn.ghost.sm', {
+      style:{display: pendFiltrosActivos() ? '' : 'none'},
+      onclick: () => {
+        UI_PEND.filtros = { estado:'', asignado:'', desde:'', hasta:'' };
+        selEstado.value = ''; selAsig.value = '';
+        inpDesde.value = ''; inpHasta.value = '';
+        refresh();
+      },
+    }, [ h('i.ti.ti-x'), 'Limpiar filtros' ]);
+
     filtBar.appendChild(h('span', { style:{fontSize:'12px', color:'var(--ink-3)'} }, 'Filtrar:'));
     filtBar.appendChild(selEstado);
     filtBar.appendChild(selAsig);
-    filtBar.appendChild(btnLimpiar);
+    filtBar.appendChild(fechasGroup);
+    filtBar.appendChild(btnLimpiarTodo);
     root.appendChild(filtBar);
 
     const listaWrap = h('div');
     root.appendChild(listaWrap);
 
     function aplicarFiltros(arr) {
+      const f = UI_PEND.filtros;
+      // Rango fechas: parsear con noon local para evitar desfases UTC.
+      const desdeMs = f.desde ? new Date(f.desde + 'T00:00:00').getTime() : null;
+      const hastaMs = f.hasta ? new Date(f.hasta + 'T23:59:59').getTime() : null;
       return arr.filter(p => {
-        if (UI_PEND.filtros.estado && p.estado !== UI_PEND.filtros.estado) return false;
-        if (UI_PEND.filtros.asignado && p.asignado !== UI_PEND.filtros.asignado) return false;
+        if (f.estado && p.estado !== f.estado) return false;
+        if (f.asignado) {
+          if (f.asignado === '__SIN_ASIGNAR__') {
+            if (p.asignado) return false;
+          } else if (p.asignado !== f.asignado) return false;
+        }
+        if (desdeMs != null || hastaMs != null) {
+          if (!p.vence) return false;
+          const vMs = new Date(p.vence).getTime();
+          if (isNaN(vMs)) return false;
+          if (desdeMs != null && vMs < desdeMs) return false;
+          if (hastaMs != null && vMs > hastaMs) return false;
+        }
         return true;
       });
     }
 
     function refresh() {
+      // Actualizar visibilidad de botones de limpiar según filtros activos.
+      btnLimpiarFechas.style.display = (UI_PEND.filtros.desde || UI_PEND.filtros.hasta) ? '' : 'none';
+      btnLimpiarTodo.style.display = pendFiltrosActivos() ? '' : 'none';
+
       listaWrap.innerHTML = '';
       const filtrados = aplicarFiltros(STATE.pendientes);
       if (!filtrados.length) {
@@ -6380,8 +6489,9 @@ VIEWS.tareas = {
           icon:'ti-filter-off', title:'Sin pendientes con el filtro actual',
           desc:'Probá quitar los filtros para ver todos los pendientes.',
           actions:[{ label:'Limpiar filtros', icon:'ti-x', onclick: () => {
-            UI_PEND.filtros = { estado:'', asignado:'' };
+            UI_PEND.filtros = { estado:'', asignado:'', desde:'', hasta:'' };
             selEstado.value = ''; selAsig.value = '';
+            inpDesde.value = ''; inpHasta.value = '';
             refresh();
           } }],
         }));
@@ -6412,8 +6522,8 @@ VIEWS.tareas = {
         { id:'vencidos',  label:'Vencidos',          items: grupos.vencidos,  kind:'danger' },
         { id:'porVencer', label:'Por vencer (≤3d)',  items: grupos.porVencer, kind:'warning' },
         { id:'abiertos',  label:'Abiertos',          items: grupos.abiertos,  kind:'info' },
-        { id:'enCurso',   label:'En curso',          items: grupos.enCurso,   kind:'warning' },
-        { id:'esperando', label:'Esperando',         items: grupos.esperando, kind:'purple' },
+        { id:'enCurso',   label:'En curso',          items: grupos.enCurso,   kind:'info' },
+        { id:'esperando', label:'Esperando',         items: grupos.esperando, kind:'muted' },
         { id:'cerrados',  label:'Cerrados recientes',items: grupos.cerrados,  kind:'success' },
       ];
       seccionesDef.forEach(sec => {
@@ -6436,8 +6546,9 @@ VIEWS.tareas = {
       const targetId = UI_PEND.focusId;
       UI_PEND.focusId = null;
       UI_PEND.expanded.add(targetId);
-      UI_PEND.filtros = { estado:'', asignado:'' };
+      UI_PEND.filtros = { estado:'', asignado:'', desde:'', hasta:'' };
       selEstado.value = ''; selAsig.value = '';
+      inpDesde.value = ''; inpHasta.value = '';
       refresh();
       setTimeout(() => {
         const card = document.querySelector(`#view [data-pendiente-id="${targetId}"]`);

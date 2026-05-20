@@ -1,5 +1,118 @@
 # Changelog
 
+## Fase 1 · Iteración R5 — Bug vinculación MP No Op + filtro fechas en Pendientes
+
+**Nota de contexto**: el prompt de R5 asumía que se trabajaba sobre R3,
+pero la R4 anterior ya había implementado la mayor parte de la "Parte
+B" (renombrado Tareas→Pendientes, estados granulares, subtareas, log,
+agrupación por urgencia, migración v33, foco desde ficha, etc.). Esta
+iteración entrega: (1) **Parte A completa** — bug de vinculación MP
+SI+No Op; (2) **diff de Parte B** sobre R4 — tercer filtro de rango de
+fechas, opción "(sin asignar)" en el filtro de responsable, ajuste de
+colores de dos grupos, ocultar "Limpiar filtros" cuando no aplica.
+
+### Parte A — MP con resultado SI + estadoFinal NoOperativo dispara vinculación
+
+Bug reportado: en R3+R4 una MP ejecutada (SI) que dejaba el equipo en
+NoOperativo (porque durante la mantención se detectó una falla) NO
+ofrecía vincular a ciclo correctivo; se perdía la trazabilidad. La
+versión legacy v27 sí lo manejaba.
+
+- `MP.register` devuelve `needsVinculacion = 'SI_NO_OP'` cuando
+  `resultado === 'SI' && estadoFinal === 'NoOperativo'`. Se mantiene
+  C2/C3 con prioridad y se usa `else if` para que no haya solapes.
+- `MP.update` (edición retroactiva) espeja la misma lógica con guard:
+  no devuelve `needsVinculacion` si la MP ya tenía `correctivoUuid`.
+- El call site en el modal Registrar MP maneja el nuevo valor:
+
+```js
+if (res.needsVinculacion === 'SI_NO_OP')
+  abrirModalVinculacionC3(res.equipo, res.mp, { motivo: 'SI_NO_OP' });
+```
+
+- `abrirModalVinculacionC3(equipo, mp, opts)` acepta tercer parámetro
+  `opts = { motivo: 'C3' | 'SI_NO_OP' }` (default `'C3'`). El modal
+  reutiliza el mismo cuerpo (3 opciones idénticas) y solo adapta:
+  título, subtítulo, intro, toast al cancelar, tipo de evento al
+  vincular (`CAUSAL-VINCULADA` vs `MP-SI-NOOP-VINCULADA`).
+- `abrirModalVinculacion(equipo, mp)` (atajo) también deriva al
+  motivo `SI_NO_OP` cuando corresponde.
+- Al cancelar la vinculación, la MP queda marcada con
+  `sinVincular: true` y persistida. El equipo NO se revierte (se
+  respeta la decisión del operador).
+- Banner en la ficha (`alertasDeEquipo`): la verificación se
+  generalizó. Detecta:
+  - C2 / C3 sin `correctivoUuid` (existente).
+  - SI + estadoFinal=NoOperativo + `sinVincular === true` + sin
+    `correctivoUuid` (caso nuevo).
+  - Texto del banner adaptado: para SI_NO_OP dice "MP del DD-MM-YYYY
+    con estado No Operativo sin vincular a ciclo — corresponde abrir
+    o asociar uno."
+
+#### Caso simétrico SI + ServicioTecnico
+
+Verificado: el dropdown `estadoFinal` del modal Registrar MP **NO**
+incluye `'ServicioTecnico'` (las opciones son Operativo /
+NoOperativo / FueraDeServicio). Por lo tanto A.6 del prompt no
+aplica; no se implementó.
+
+### Parte B — Diff sobre lo que ya estaba en R4
+
+R4 (commit anterior) ya entregó: renombrado Tareas→Pendientes (ID
+interno `'tareas'` preservado), estados granulares
+(Abierto/EnCurso/Esperando/Cerrado), subtareas, log, agrupación por
+urgencia (6 grupos), gestión inline expandible, migración v33,
+"Pendientes del equipo" con foco al click. Todo eso quedó intacto.
+
+Lo nuevo en R5 sobre la vista Pendientes:
+
+- **Tercer filtro: rango de fechas de compromiso**. Dos
+  `<input type="date">` con labels "desde" y "hasta". Si ambos
+  vacíos, no filtra. Si hay valor, filtra los pendientes con `vence`
+  dentro del rango inclusivo. Pendientes sin `vence` quedan fuera
+  cuando el filtro está activo. Botón ✕ pequeño a la derecha para
+  limpiar solo el rango; visible únicamente si hay rango activo.
+- **Opción "(sin asignar)" en el filtro de responsable** (valor
+  centinela `__SIN_ASIGNAR__`). Filtra pendientes con
+  `asignado` vacío o undefined.
+- **`UI_PEND.filtros`** ahora incluye `{ estado, asignado, desde,
+  hasta }`. Todos los sitios que limpian filtros actualizan los 4
+  campos.
+- **Botón "Limpiar filtros"** unificado: visible solo cuando algún
+  filtro está activo. Limpia los 4 campos y resetea los 4 controles
+  visuales.
+- **Colores de grupos ajustados** a lo pedido:
+  - `En curso`: `warning` → `info`.
+  - `Esperando`: `purple` → `muted`.
+  - Otros (Vencidos `danger`, Por vencer `warning`, Abiertos `info`,
+    Cerrados recientes `success`) sin cambio.
+
+### Simulaciones R5
+
+| # | Flujo | Resultado |
+|---|-------|-----------|
+| Suite 1-15 + 4b/7 + R2-R4 | Sin regresiones | OK · 33 sims verdes |
+| A.1 | MP register SI+NoOperativo → needsVinculacion='SI_NO_OP' | OK |
+| A.2 | C3 normal sin regresión | OK |
+| A.3 | SI + Operativo no pide vincular | OK |
+| A.4 | Modal motivo SI_NO_OP muestra textos adaptados | OK · título, subtítulo, intro, son distintos al motivo C3 |
+| A.5 | Motivo C3 preserva textos originales | OK |
+| A.6 | Cancelar marca `mp.sinVincular=true` y banner aparece | OK · alerta detectada por `alertasDeEquipo` |
+| B.1 | Filtro "(sin asignar)" en Responsable | OK · opción presente, filtra correctamente |
+| B.2 | Filtro por rango de fechas + botón ✕ para limpiar | OK · filtra solo del mes, botón aparece/desaparece según rango |
+| B.3 | Combinación de los 3 filtros (estado + responsable + rango) | OK · intersección correcta · "Limpiar filtros" funciona y se oculta sin filtros activos |
+
+### NO realizado intencionalmente
+
+- Fase 2 (Apps Script) sigue pausada. Directorio `apps-script/` sin
+  tocar.
+- No se reescribió `abrirModalVinculacionC3` ni se creó modal nuevo;
+  se extendió con el parámetro `opts` como pidió el prompt.
+- Caso simétrico A.6 (SI + ServicioTecnico): no aplica porque el
+  `estadoFinal` no expone esa opción.
+- IDs internos, firmas existentes y flujo "Completar folio SIGEM"
+  preservados.
+
 ## Fase 1 · Iteración R4 — Pendientes con gestión completa
 
 ### 1. Renombrado "Tareas" → "Pendientes" en UI (ID interno preservado)
