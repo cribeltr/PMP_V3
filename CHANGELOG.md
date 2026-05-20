@@ -1,6 +1,15 @@
 # Changelog
 
-## It.1 — Foundation + Inventario (en curso)
+## It.1.1 — Tema oscuro
+
+- Modo oscuro como tema por defecto (paper-dark `#17161b`, surfaces
+  escalonadas, acentos semánticos recalibrados, scrollbars y backdrops
+  ajustados).
+- Toggle en sidebar y en command palette; preferencia persistida en
+  `pmp.v3.ui.theme`. Tema aplicado antes del primer paint para evitar
+  flicker.
+
+## It.1 — Foundation + Inventario
 
 - Esqueleto del nuevo `pmp.html`: design system (Inter, paper, bordes
   0.5px, acentos semánticos), sidebar fija, navegación entre vistas.

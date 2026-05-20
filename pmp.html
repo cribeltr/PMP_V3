@@ -1,9 +1,18 @@
 <!doctype html>
-<html lang="es">
+<html lang="es" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>PMP · SEC · HHHA Temuco</title>
+<script>
+  (function () {
+    try {
+      var t = localStorage.getItem('pmp.v3.ui.theme');
+      if (t !== 'dark' && t !== 'light') t = 'dark';
+      document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {}
+  })();
+</script>
 
 <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
 <link rel="preconnect" href="https://cdn.sheetjs.com" crossorigin>
@@ -46,6 +55,10 @@
   --shadow-2: 0 4px 16px rgba(0,0,0,.06);
   --shadow-3: 0 20px 60px rgba(0,0,0,.18);
 
+  --backdrop: rgba(31,29,24,.28);
+  --backdrop-stacked: rgba(31,29,24,.14);
+  --select-arrow: "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path fill='none' stroke='%237a766c' stroke-width='1.4' d='M2 4l3 3 3-3'/></svg>";
+
   --sb-w: 232px;
 
   --z-popover: 100;
@@ -53,6 +66,40 @@
   --z-modal:   300;
   --z-toast:   400;
   --z-cmdk:    500;
+}
+
+:root[data-theme="dark"] {
+  --paper:        #17161b;
+  --paper-2:      #1d1c22;
+  --paper-3:      #26252c;
+  --ink:          #ece9e0;
+  --ink-2:        #c4c0b6;
+  --ink-3:        #8a8579;
+  --ink-4:        #5d5a52;
+  --line:         rgba(255,255,255,.07);
+  --line-2:       rgba(255,255,255,.13);
+  --line-strong:  rgba(255,255,255,.22);
+
+  --info:         #8ab4ff;
+  --info-bg:      rgba(37,99,235,.22);
+  --success:      #74cf95;
+  --success-bg:   rgba(21,127,61,.22);
+  --warning:      #e6b85f;
+  --warning-bg:   rgba(161,98,7,.22);
+  --danger:       #f08585;
+  --danger-bg:    rgba(185,28,28,.26);
+  --purple:       #b89bf5;
+  --purple-bg:    rgba(109,40,217,.26);
+
+  --shadow-1: 0 1px 0 rgba(0,0,0,.4);
+  --shadow-2: 0 4px 16px rgba(0,0,0,.4);
+  --shadow-3: 0 24px 70px rgba(0,0,0,.6);
+
+  --backdrop: rgba(0,0,0,.5);
+  --backdrop-stacked: rgba(0,0,0,.28);
+  --select-arrow: "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path fill='none' stroke='%238a8579' stroke-width='1.4' d='M2 4l3 3 3-3'/></svg>";
+
+  color-scheme: dark;
 }
 
 /* ============================================================
@@ -290,10 +337,12 @@ hr { border: 0; border-top: .5px solid var(--line); margin: 0; }
 }
 .textarea { resize: vertical; min-height: 60px; line-height: 1.45; }
 .select { appearance: none; padding-right: 28px;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path fill='none' stroke='%237a766c' stroke-width='1.4' d='M2 4l3 3 3-3'/></svg>");
+  background-image: url(var(--select-arrow));
   background-repeat: no-repeat;
   background-position: right 10px center;
 }
+:root .select { background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path fill='none' stroke='%237a766c' stroke-width='1.4' d='M2 4l3 3 3-3'/></svg>"); }
+:root[data-theme="dark"] .select { background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path fill='none' stroke='%238a8579' stroke-width='1.4' d='M2 4l3 3 3-3'/></svg>"); }
 .search {
   display: flex;
   align-items: center;
@@ -452,14 +501,14 @@ hr { border: 0; border-top: .5px solid var(--line); margin: 0; }
    ============================================================ */
 .backdrop {
   position: fixed; inset: 0;
-  background: rgba(31,29,24,.28);
+  background: var(--backdrop);
   z-index: var(--z-modal);
   display: grid;
   place-items: center;
   padding: 24px;
   animation: fade-in 140ms ease-out;
 }
-.backdrop.is-stacked { background: rgba(31,29,24,.14); }
+.backdrop.is-stacked { background: var(--backdrop-stacked); }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes slide-up { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes slide-right { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: translateX(0); } }
@@ -542,7 +591,7 @@ hr { border: 0; border-top: .5px solid var(--line); margin: 0; }
 /* Command palette */
 .cmdk-backdrop {
   position: fixed; inset: 0;
-  background: rgba(31,29,24,.28);
+  background: var(--backdrop);
   z-index: var(--z-cmdk);
   display: flex;
   justify-content: center;
@@ -725,6 +774,10 @@ hr { border: 0; border-top: .5px solid var(--line); margin: 0; }
 
     <div class="sidebar-footer">
       <div class="session-chip" id="sessionChip"></div>
+      <button class="btn ghost sm" id="themeToggle" title="Cambiar tema" style="justify-content:flex-start;">
+        <i class="ti ti-moon-stars"></i>
+        <span id="themeToggleLabel">Tema oscuro</span>
+      </button>
     </div>
   </aside>
 
@@ -2229,6 +2282,7 @@ const CMDK = (() => {
       { group:'Acciones', label:'Importar maestro', icon:'ti-file-spreadsheet', run: handleImportMaestro },
       { group:'Acciones', label:'Descargar backup', icon:'ti-database-export', run: exportBackup },
       { group:'Acciones', label:'Restaurar backup', icon:'ti-database-import', run: importBackup },
+      { group:'Acciones', label:'Alternar tema claro/oscuro', icon:'ti-contrast-2', run: () => Theme.toggle() },
     ];
     const navs = NAV_ITEMS.map(it => ({
       group:'Ir a', label: it.label, icon: it.icon, run: () => Router.go(it.id), meta: it.soon ? 'pronto' : '',
@@ -2316,6 +2370,30 @@ document.addEventListener('keydown', (e) => {
 });
 
 /* ============================================================
+   THEME
+   ============================================================ */
+const Theme = {
+  current() {
+    return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+  },
+  set(t) {
+    document.documentElement.setAttribute('data-theme', t);
+    try { localStorage.setItem('pmp.v3.ui.theme', t); } catch {}
+    this.syncToggle();
+  },
+  toggle() { this.set(this.current() === 'dark' ? 'light' : 'dark'); },
+  syncToggle() {
+    const btn = $('#themeToggle');
+    if (!btn) return;
+    const isDark = this.current() === 'dark';
+    const icon = btn.querySelector('i');
+    const label = $('#themeToggleLabel');
+    if (icon)  icon.className = 'ti ' + (isDark ? 'ti-moon-stars' : 'ti-sun');
+    if (label) label.textContent = isDark ? 'Tema oscuro' : 'Tema claro';
+  },
+};
+
+/* ============================================================
    BOOT
    ============================================================ */
 function boot() {
@@ -2324,6 +2402,8 @@ function boot() {
     loadState();
     renderNav();
     renderSessionChip();
+    Theme.syncToggle();
+    $('#themeToggle').addEventListener('click', () => Theme.toggle());
     $('#openCmdk').addEventListener('click', () => CMDK.open());
     bus.on('state:change', () => renderSessionChip());
 
