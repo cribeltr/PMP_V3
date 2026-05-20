@@ -532,6 +532,12 @@ hr { border: 0; border-top: .5px solid var(--line); margin: 0; }
 @keyframes slide-up { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes slide-right { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: translateX(0); } }
 @keyframes pulseDot { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+@keyframes pendienteFlash {
+  0%   { box-shadow: 0 0 0 0 var(--info); border-color: var(--info); }
+  60%  { box-shadow: 0 0 0 6px rgba(94,168,232,0); border-color: var(--info); }
+  100% { box-shadow: 0 0 0 0 transparent; border-color: var(--line); }
+}
+.pendiente-highlight { animation: pendienteFlash 2.4s ease-out; border-color: var(--info) !important; }
 
 .modal {
   background: var(--paper);
@@ -984,7 +990,7 @@ const NAV_ITEMS = [
   { id: 'pmp',      label: 'PMP anual',  icon: 'ti-calendar-month' },
   { id: 'ciclos',   label: 'Ciclos correctivos', icon: 'ti-tools' },
   { id: 'entregas', label: 'Entregas',   icon: 'ti-clipboard-list' },
-  { id: 'tareas',   label: 'Tareas',     icon: 'ti-checks' },
+  { id: 'tareas',   label: 'Pendientes', icon: 'ti-checks' },
   { id: 'reportes', label: 'Reportes',   icon: 'ti-report' },
   { id: 'agenda',   label: 'Agenda',     icon: 'ti-address-book' },
   { id: 'config',   label: 'Configuración', icon: 'ti-settings' },
@@ -1824,6 +1830,14 @@ const RUTAS_OPCIONES = [
 ];
 const ESLABON_DONE = (c, es) => !!(c[es] && c[es].fechaEvento);
 
+const ESTADOS_PENDIENTE = ['Abierto','EnCurso','Esperando','Cerrado'];
+const ESTADO_PENDIENTE_LABEL = {
+  Abierto:'Abierto', EnCurso:'En curso', Esperando:'Esperando', Cerrado:'Cerrado',
+};
+const ESTADO_PENDIENTE_PILL = {
+  Abierto:'info', EnCurso:'warning', Esperando:'purple', Cerrado:'success',
+};
+
 const PENDIENTE = {
   crear({ tipo='general', descripcion, equipoUuid=null, asignado='', vence=null, meta=null }) {
     const p = {
@@ -1836,6 +1850,7 @@ const PENDIENTE = {
       creado: new Date().toISOString(),
       vence,
       log: [{ ts: new Date().toISOString(), nota: 'Creado' }],
+      subtareas: [],
       meta: meta || null,
     };
     STATE.pendientes.push(p);
@@ -1847,15 +1862,154 @@ const PENDIENTE = {
     persist('equipos');
     return p;
   },
+
   cerrar(id, nota='') {
     const p = STATE.pendientes.find(x => x.id === id);
     if (!p) return;
+    const anterior = p.estado;
     p.estado = 'Cerrado';
     p.cerrado = new Date().toISOString();
-    p.log.push({ ts: p.cerrado, nota: 'Cerrado' + (nota ? `: ${nota}` : '') });
+    p.cerradoEn = p.cerrado;
+    p.log = p.log || [];
+    p.log.push({ ts: p.cerrado, nota: `Estado: ${anterior} → Cerrado` + (nota ? ` · ${nota}` : '') });
     persist('pendientes');
   },
+
+  /** Cambia el estado a uno de ESTADOS_PENDIENTE. Si pasa de Cerrado a otro, lo re-abre. */
+  cambiarEstado(id, nuevoEstado, nota='') {
+    if (!ESTADOS_PENDIENTE.includes(nuevoEstado)) throw new Error('Estado inválido: ' + nuevoEstado);
+    const p = STATE.pendientes.find(x => x.id === id);
+    if (!p) return;
+    const anterior = p.estado;
+    if (anterior === nuevoEstado) return;
+    p.estado = nuevoEstado;
+    if (anterior === 'Cerrado' && nuevoEstado !== 'Cerrado') {
+      // Re-abrir: limpiar timestamps de cierre
+      p.cerrado = null;
+      p.cerradoEn = null;
+    }
+    if (nuevoEstado === 'Cerrado') {
+      p.cerrado = new Date().toISOString();
+      p.cerradoEn = p.cerrado;
+    }
+    p.log = p.log || [];
+    p.log.push({ ts: new Date().toISOString(), nota: `Estado: ${anterior} → ${nuevoEstado}` + (nota ? ` · ${nota}` : '') });
+    persist('pendientes');
+    return p;
+  },
+
+  /** Edita campos del pendiente, registra cambios en el log. */
+  editar(id, cambios) {
+    const p = STATE.pendientes.find(x => x.id === id);
+    if (!p) return;
+    const editables = ['descripcion','asignado','vence','equipoUuid','tipo'];
+    const diffs = [];
+    editables.forEach(k => {
+      if (cambios[k] === undefined) return;
+      const prev = p[k] ?? '';
+      const next = cambios[k] ?? '';
+      if (String(prev) !== String(next)) {
+        diffs.push(`${k}: "${prev || '∅'}" → "${next || '∅'}"`);
+        p[k] = cambios[k];
+      }
+    });
+    if (!diffs.length) return p;
+    p.log = p.log || [];
+    p.log.push({ ts: new Date().toISOString(), nota: 'Editado · ' + diffs.join(' · ') });
+    // Si cambió el equipoUuid, actualizar las referencias en STATE.equipos[].pendientesIds
+    if (cambios.equipoUuid !== undefined) {
+      STATE.equipos.forEach(eq => {
+        if (eq.pendientesIds && eq.pendientesIds.includes(p.id) && eq.uuid !== cambios.equipoUuid) {
+          eq.pendientesIds = eq.pendientesIds.filter(x => x !== p.id);
+        }
+      });
+      if (cambios.equipoUuid) {
+        const eqNew = EQ.byUuid(cambios.equipoUuid);
+        if (eqNew) {
+          eqNew.pendientesIds = eqNew.pendientesIds || [];
+          if (!eqNew.pendientesIds.includes(p.id)) eqNew.pendientesIds.push(p.id);
+        }
+      }
+      persist('equipos');
+    }
+    persist('pendientes');
+    return p;
+  },
+
+  agregarNota(id, nota) {
+    const p = STATE.pendientes.find(x => x.id === id);
+    if (!p || !nota || !nota.trim()) return;
+    p.log = p.log || [];
+    p.log.push({ ts: new Date().toISOString(), nota: nota.trim() });
+    persist('pendientes');
+    return p;
+  },
+
+  agregarSubtarea(id, texto) {
+    const p = STATE.pendientes.find(x => x.id === id);
+    if (!p || !texto || !texto.trim()) return;
+    p.subtareas = p.subtareas || [];
+    const st = { id: uuid(), texto: texto.trim(), completada: false, ts: new Date().toISOString() };
+    p.subtareas.push(st);
+    p.log = p.log || [];
+    p.log.push({ ts: new Date().toISOString(), nota: `Subtarea agregada: "${st.texto}"` });
+    persist('pendientes');
+    return st;
+  },
+
+  toggleSubtarea(id, subId) {
+    const p = STATE.pendientes.find(x => x.id === id);
+    if (!p) return;
+    const st = (p.subtareas || []).find(s => s.id === subId);
+    if (!st) return;
+    st.completada = !st.completada;
+    persist('pendientes');
+    return st;
+  },
+
+  eliminarSubtarea(id, subId) {
+    const p = STATE.pendientes.find(x => x.id === id);
+    if (!p) return;
+    const st = (p.subtareas || []).find(s => s.id === subId);
+    if (!st) return;
+    p.subtareas = p.subtareas.filter(s => s.id !== subId);
+    p.log = p.log || [];
+    p.log.push({ ts: new Date().toISOString(), nota: `Subtarea eliminada: "${st.texto}"` });
+    persist('pendientes');
+  },
+
+  reabrir(id, nota='') {
+    return this.cambiarEstado(id, 'Abierto', nota || 'Reabierto');
+  },
 };
+
+/**
+ * Migración idempotente de pendientes al esquema R4.
+ * - Asegura subtareas[], log[], estado válido, alias vence/asignado/id.
+ * Loguea en consola las normalizaciones aplicadas (sin bloquear el boot).
+ */
+function migrarPendientesV33(arr) {
+  if (!Array.isArray(arr)) return 0;
+  let touched = 0;
+  arr.forEach(p => {
+    if (!p || typeof p !== 'object') return;
+    if (!p.id && p.uuid) { p.id = p.uuid; touched++; }
+    if (!p.id) { p.id = uuid(); touched++; }
+    if (!Array.isArray(p.subtareas)) { p.subtareas = []; touched++; }
+    if (!Array.isArray(p.log)) {
+      p.log = [{ ts: p.creado || new Date().toISOString(), nota: 'Creado' }];
+      touched++;
+    }
+    if (!ESTADOS_PENDIENTE.includes(p.estado)) {
+      if (p.estado) console.warn('[migrarPendientesV33] estado desconocido "' + p.estado + '" → Abierto', p.id);
+      p.estado = 'Abierto';
+      touched++;
+    }
+    if (p.fechaCompromiso && !p.vence) { p.vence = p.fechaCompromiso; touched++; }
+    if (p.responsable && !p.asignado) { p.asignado = p.responsable; touched++; }
+  });
+  return touched;
+}
 
 function pushEvento(equipo, ev) {
   equipo.eventos = equipo.eventos || [];
@@ -4934,7 +5088,7 @@ VIEWS.dash = {
     kpis.appendChild(kpiCard({ label: 'Ciclos abiertos', value: fmt.number(ciclos), kind: ciclos ? 'info' : 'muted', onclick: () => Router.go('ciclos') }));
     kpis.appendChild(kpiCard({ label: `MP ${MESES[mes-1]} cumplimiento`, value: `${pctCumpl}%`, kind: pctCumpl >= 80 ? 'success' : pctCumpl >= 50 ? 'warning' : 'danger', onclick: () => Router.go('pmp') }));
     kpis.appendChild(kpiCard({ label: `MP ${MESES[mes-1]} pendientes`,   value: `${fmt.number(mpPendientes)} / ${fmt.number(mpProgramadas)}`, kind: mpPendientes ? 'warning' : 'success', onclick: () => Router.go('pmp') }));
-    kpis.appendChild(kpiCard({ label: 'Tareas abiertas',     value: fmt.number(pendAb),       kind: pendVencidos ? 'danger' : (pendAb ? 'warning' : 'muted'), onclick: () => Router.go('tareas') }));
+    kpis.appendChild(kpiCard({ label: 'Pendientes abiertos', value: fmt.number(pendAb),       kind: pendVencidos ? 'danger' : (pendAb ? 'warning' : 'muted'), onclick: () => Router.go('tareas') }));
     root.appendChild(kpis);
 
     // Alertas globales destacadas
@@ -5586,19 +5740,47 @@ function renderFichaTab(id, e) {
       break;
     }
     case 'pendientes': {
-      const ps = (e.pendientesIds||[])
-        .map(id => STATE.pendientes.find(p => p.id === id))
-        .filter(Boolean);
+      // Resolver pendientes del equipo: tanto por pendientesIds como por equipoUuid directo (defensivo).
+      const idsSet = new Set(e.pendientesIds || []);
+      const ps = STATE.pendientes.filter(p => idsSet.has(p.id) || p.equipoUuid === e.uuid);
       if (!ps.length) { wrap.appendChild(emptyTabHint('Sin pendientes administrativos vinculados.')); break; }
+      // Ordenar: abiertos primero por vencimiento ascendente, luego cerrados
+      ps.sort((a,b) => {
+        const ca = a.estado === 'Cerrado' ? 1 : 0;
+        const cb = b.estado === 'Cerrado' ? 1 : 0;
+        if (ca !== cb) return ca - cb;
+        return new Date(a.vence || '9999') - new Date(b.vence || '9999');
+      });
       ps.forEach(p => {
-        wrap.appendChild(h('div.card', { style:{ marginBottom:'8px' } }, [
-          h('div.card-h', [ h('h3', p.descripcion || '(sin descripción)'), p.estado === 'Cerrado' ? h('span.pill.success','Cerrado') : h('span.pill.warning','Abierto') ]),
+        const subN = (p.subtareas || []).length;
+        const subDone = (p.subtareas || []).filter(s => s.completada).length;
+        const vencidoDias = (p.vence && p.estado !== 'Cerrado') ? fmt.daysSince(p.vence) : null;
+        const card = h('div.card', {
+          style:{ marginBottom:'8px', cursor:'pointer' },
+          title:'Abrir en Pendientes',
+          onclick: () => {
+            UI_PEND.focusId = p.id;
+            UI_PEND.filtros = { estado:'', asignado:'' };   // limpiar filtros para asegurar que aparezca
+            // Cerrar el modal de ficha si está abierto.
+            const modals = document.querySelectorAll('#modals .backdrop');
+            modals.forEach(m => { try { m.querySelector('.modal .close')?.click(); } catch {} });
+            Router.go('tareas');
+          },
+        }, [
+          h('div.card-h', [
+            h('h3', p.descripcion || '(sin descripción)'),
+            p.tipo ? h('span.pill', p.tipo) : null,
+            h(`span.pill.${ESTADO_PENDIENTE_PILL[p.estado] || 'muted'}`, ESTADO_PENDIENTE_LABEL[p.estado] || p.estado),
+            vencidoDias > 0 ? h('span.pill.danger', `vencido hace ${vencidoDias}d`) : null,
+            subN ? h(`span.pill.${subDone===subN ? 'success' : subDone > 0 ? 'info' : 'muted'}`, `${subDone}/${subN} subtareas`) : null,
+          ]),
           h('div', { style:{ fontSize:'12.5px', color:'var(--ink-2)' } }, [
             p.asignado ? `Asignado a ${p.asignado}. ` : '',
-            p.vence ? `Vence ${fmt.date(p.vence)}. ` : (p.fechaCompromiso ? `Vence ${fmt.date(p.fechaCompromiso)}. ` : ''),
+            p.vence ? `Vence ${fmt.date(p.vence)}. ` : '',
             p.creado ? `Creado ${fmt.rel(p.creado)}.` : '',
           ]),
-        ]));
+        ]);
+        wrap.appendChild(card);
       });
       break;
     }
@@ -6127,87 +6309,346 @@ function askPeriodoModal(periodoSugerido) {
   });
 }
 
+// Estado UI volátil para la vista Pendientes (filtros + foco al navegar desde otras vistas).
+const UI_PEND = {
+  filtros: { estado: '', asignado: '' },
+  focusId: null,
+  // Tracks which cards are expanded (Set of ids).
+  expanded: new Set(),
+};
+
 VIEWS.tareas = {
-  title: 'Tareas',
+  title: 'Pendientes',
   render(root) {
     root.appendChild(viewHeader({
-      title: 'Tareas',
+      title: 'Pendientes',
       desc: 'Pendientes administrativos del SEC (folios SIGEM, solicitudes a clínico, gestiones varias).',
       actions: [
-        { label:'Nueva tarea', icon:'ti-plus', primary:true, onclick: () => abrirModalNuevaTarea() },
+        { label:'Nuevo pendiente', icon:'ti-plus', primary:true, onclick: () => abrirModalNuevoPendiente() },
       ],
     }));
-    const abiertas = STATE.pendientes.filter(p => p.estado !== 'Cerrado');
-    const cerradas = STATE.pendientes.filter(p => p.estado === 'Cerrado').slice(-20).reverse();
 
-    if (!abiertas.length && !cerradas.length) {
-      root.appendChild(emptyState({ icon:'ti-checks', title:'Sin pendientes', desc:'Se generan automáticamente desde el flujo de causales C3 / SIGEM, o podés crearlas manualmente.' }));
+    const total = STATE.pendientes.length;
+    if (!total) {
+      root.appendChild(emptyState({
+        icon:'ti-checks', title:'Sin pendientes',
+        desc:'Se generan automáticamente desde el flujo de causales C3 / SIGEM, o podés crearlos manualmente.',
+        actions:[{ label:'Nuevo pendiente', icon:'ti-plus', primary:true, onclick: () => abrirModalNuevoPendiente() }],
+      }));
       return;
     }
 
-    function renderList(title, items, withClose=true) {
-      const sec = h('div.section');
-      sec.appendChild(h('h3', `${title} (${items.length})`));
-      if (!items.length) { sec.appendChild(h('div.card',{style:{color:'var(--ink-3)',fontSize:'12.5px'}},'Sin elementos.')); return sec; }
-      items.forEach(p => {
-        const e = p.equipoUuid ? EQ.byUuid(p.equipoUuid) : null;
-        const vencido = p.vence && new Date(p.vence) < new Date();
-        const esDiff = p.tipo === 'diferencias-maestro' && p.meta?.diff;
-        const cardChildren = [
-          h('div.card-h', [
-            h('h3', p.descripcion || '(sin descripción)'),
-            p.tipo ? h('span.pill' + (esDiff?'.info':''), p.tipo) : null,
-            vencido && p.estado !== 'Cerrado' ? h('span.pill.danger', `vencido hace ${fmt.daysSince(p.vence)}d`) : null,
-            p.estado === 'Cerrado' ? h('span.pill.success','cerrado') : null,
-          ]),
-          h('div', { style:{fontSize:'12.5px', color:'var(--ink-2)'} }, [
-            e ? h('span', { style:{cursor:'pointer', textDecoration:'underline dotted', marginRight:'8px'}, onclick: () => openFicha(e.uuid) }, e.nombre) : null,
-            p.asignado ? ` · ${p.asignado}` : '',
-            p.vence ? ` · vence ${fmt.date(p.vence)}` : '',
-            ` · creado ${fmt.rel(p.creado)}`,
-          ]),
-        ];
-        if (esDiff) {
-          const t = p.meta.diff.totales || {};
-          cardChildren.push(h('div', { style:{display:'flex', gap:'6px', marginTop:'8px', flexWrap:'wrap', fontSize:'11.5px'} }, [
-            t.nuevos   ? h('span.pill.info',    `${t.nuevos} nuevos`)   : null,
-            t.ausentes ? h('span.pill.warning', `${t.ausentes} ausentes`) : null,
-            t.cambios  ? h('span.pill.warning', `${t.cambios} con cambios`) : null,
-            t.grillaCambios ? h('span.pill', `${t.grillaCambios} cambios de grilla`) : null,
-          ]));
-        }
-        const acts = [];
-        if (esDiff) {
-          acts.push(h('button.btn.sm', { onclick: () => abrirModalDiferenciasMaestro(p.meta.diff, { review: true, pendienteId: p.id }) }, [ h('i.ti.ti-eye'), 'Revisar diferencias' ]));
-        }
-        if (withClose && p.estado !== 'Cerrado') {
-          acts.push(h('button.btn.sm', { onclick: async () => {
-            const ok = await UI.dialog({ title:'Cerrar pendiente', message: '¿Cerrar este pendiente?', confirmText:'Cerrar' });
-            if (!ok) return;
-            PENDIENTE.cerrar(p.id);
-            Router.go('tareas');
-          }}, [ h('i.ti.ti-check'), 'Cerrar' ]));
-        }
-        if (acts.length) cardChildren.push(h('div', { style:{marginTop:'10px', display:'flex', gap:'8px'} }, acts));
-        sec.appendChild(h('div.card', { style:{marginBottom:'8px'} }, cardChildren));
+    // === Filtros ===
+    const filtBar = h('div', { style:{display:'flex', gap:'8px', alignItems:'center', flexWrap:'wrap', marginBottom:'12px'} });
+    const selEstado = selectCtl(
+      [{ value:'', label:'Todos los estados' }, ...ESTADOS_PENDIENTE.map(e => ({ value:e, label: ESTADO_PENDIENTE_LABEL[e] }))],
+      UI_PEND.filtros.estado,
+      { onchange: (e) => { UI_PEND.filtros.estado = e.target.value; refresh(); } },
+    );
+    const selAsig = selectCtl(
+      [{ value:'', label:'Todos los responsables' }, ...TECNICOS_OFICIALES.map(t => ({ value:t, label:t }))],
+      UI_PEND.filtros.asignado,
+      { onchange: (e) => { UI_PEND.filtros.asignado = e.target.value; refresh(); } },
+    );
+    const btnLimpiar = h('button.btn.ghost.sm', { onclick: () => {
+      UI_PEND.filtros = { estado:'', asignado:'' };
+      selEstado.value = ''; selAsig.value = '';
+      refresh();
+    } }, [ h('i.ti.ti-x'), 'Limpiar filtros' ]);
+    filtBar.appendChild(h('span', { style:{fontSize:'12px', color:'var(--ink-3)'} }, 'Filtrar:'));
+    filtBar.appendChild(selEstado);
+    filtBar.appendChild(selAsig);
+    filtBar.appendChild(btnLimpiar);
+    root.appendChild(filtBar);
+
+    const listaWrap = h('div');
+    root.appendChild(listaWrap);
+
+    function aplicarFiltros(arr) {
+      return arr.filter(p => {
+        if (UI_PEND.filtros.estado && p.estado !== UI_PEND.filtros.estado) return false;
+        if (UI_PEND.filtros.asignado && p.asignado !== UI_PEND.filtros.asignado) return false;
+        return true;
       });
-      return sec;
     }
-    root.appendChild(renderList('Abiertas', abiertas));
-    root.appendChild(renderList('Cerradas recientes', cerradas, false));
+
+    function refresh() {
+      listaWrap.innerHTML = '';
+      const filtrados = aplicarFiltros(STATE.pendientes);
+      if (!filtrados.length) {
+        listaWrap.appendChild(emptyState({
+          icon:'ti-filter-off', title:'Sin pendientes con el filtro actual',
+          desc:'Probá quitar los filtros para ver todos los pendientes.',
+          actions:[{ label:'Limpiar filtros', icon:'ti-x', onclick: () => {
+            UI_PEND.filtros = { estado:'', asignado:'' };
+            selEstado.value = ''; selAsig.value = '';
+            refresh();
+          } }],
+        }));
+        return;
+      }
+
+      // === Agrupación por urgencia ===
+      const ahora = Date.now();
+      const dia = 86400000;
+      const grupos = {
+        vencidos: [], porVencer: [], abiertos: [], enCurso: [], esperando: [], cerrados: [],
+      };
+      filtrados.forEach(p => {
+        if (p.estado === 'Cerrado') { grupos.cerrados.push(p); return; }
+        const tVence = p.vence ? new Date(p.vence).getTime() : null;
+        if (tVence != null && tVence < ahora) { grupos.vencidos.push(p); return; }
+        if (tVence != null && tVence - ahora <= 3 * dia) { grupos.porVencer.push(p); return; }
+        if (p.estado === 'EnCurso')   { grupos.enCurso.push(p); return; }
+        if (p.estado === 'Esperando') { grupos.esperando.push(p); return; }
+        grupos.abiertos.push(p);
+      });
+      // Cerrados recientes: solo los últimos 20.
+      grupos.cerrados = grupos.cerrados
+        .sort((a,b) => new Date(b.cerradoEn || b.cerrado || b.creado || 0) - new Date(a.cerradoEn || a.cerrado || a.creado || 0))
+        .slice(0, 20);
+
+      const seccionesDef = [
+        { id:'vencidos',  label:'Vencidos',          items: grupos.vencidos,  kind:'danger' },
+        { id:'porVencer', label:'Por vencer (≤3d)',  items: grupos.porVencer, kind:'warning' },
+        { id:'abiertos',  label:'Abiertos',          items: grupos.abiertos,  kind:'info' },
+        { id:'enCurso',   label:'En curso',          items: grupos.enCurso,   kind:'warning' },
+        { id:'esperando', label:'Esperando',         items: grupos.esperando, kind:'purple' },
+        { id:'cerrados',  label:'Cerrados recientes',items: grupos.cerrados,  kind:'success' },
+      ];
+      seccionesDef.forEach(sec => {
+        if (!sec.items.length) return;
+        const secWrap = h('div.section');
+        secWrap.appendChild(h('div', { style:{display:'flex', alignItems:'center', gap:'8px', marginBottom:'8px'} }, [
+          h('h3', { style:{margin:0} }, sec.label),
+          h(`span.pill.${sec.kind}`, String(sec.items.length)),
+        ]));
+        sec.items.forEach(p => secWrap.appendChild(renderPendienteCard(p, refresh)));
+        listaWrap.appendChild(secWrap);
+      });
+    }
+
+    refresh();
+
+    // Manejo del foco al venir desde otra vista (ficha del equipo, etc.):
+    // limpia filtros para garantizar que la card aparezca, expande y resalta.
+    if (UI_PEND.focusId) {
+      const targetId = UI_PEND.focusId;
+      UI_PEND.focusId = null;
+      UI_PEND.expanded.add(targetId);
+      UI_PEND.filtros = { estado:'', asignado:'' };
+      selEstado.value = ''; selAsig.value = '';
+      refresh();
+      setTimeout(() => {
+        const card = document.querySelector(`#view [data-pendiente-id="${targetId}"]`);
+        if (card) {
+          card.classList.add('pendiente-highlight');
+          try { card.scrollIntoView?.({ behavior:'smooth', block:'center' }); } catch {}
+          setTimeout(() => card.classList.remove('pendiente-highlight'), 2500);
+        }
+      }, 50);
+    }
   },
 };
 
-function abrirModalNuevaTarea() {
+/** Card de pendiente — colapsada por default, expandible con todas las acciones inline. */
+function renderPendienteCard(p, refresh) {
+  const e = p.equipoUuid ? EQ.byUuid(p.equipoUuid) : null;
+  const vencidoDias = (p.vence && p.estado !== 'Cerrado') ? fmt.daysSince(p.vence) : null;
+  const vencido = vencidoDias != null && vencidoDias > 0;
+  const esDiff = p.tipo === 'diferencias-maestro' && p.meta?.diff;
+  const subN = (p.subtareas || []).length;
+  const subDone = (p.subtareas || []).filter(s => s.completada).length;
+  const isExpanded = UI_PEND.expanded.has(p.id);
+
+  const card = h('div.card', { style:{marginBottom:'8px'}, dataset:{ pendienteId: p.id } });
+
+  // === Cabecera (colapsada) ===
+  const head = h('div', { style:{display:'flex', flexDirection:'column', gap:'4px'} });
+
+  // Línea 1: descripción + pills
+  const linea1 = h('div', { style:{display:'flex', alignItems:'center', gap:'8px', flexWrap:'wrap'} }, [
+    h('div', { style:{flex:1, fontWeight:500, fontSize:'13px'} }, p.descripcion || '(sin descripción)'),
+    p.tipo ? h('span.pill' + (esDiff?'.info':''), p.tipo) : null,
+    h(`span.pill.${ESTADO_PENDIENTE_PILL[p.estado] || 'muted'}`, ESTADO_PENDIENTE_LABEL[p.estado] || p.estado),
+    vencido ? h('span.pill.danger', `vencido hace ${vencidoDias}d`) : null,
+    subN ? h(`span.pill.${subDone===subN ? 'success' : subDone > 0 ? 'info' : 'muted'}`, `${subDone}/${subN} subtareas`) : null,
+  ]);
+  head.appendChild(linea1);
+
+  // Línea 2: contexto
+  const linea2 = h('div', { style:{fontSize:'12px', color:'var(--ink-3)', display:'flex', gap:'10px', flexWrap:'wrap'} });
+  if (e) {
+    linea2.appendChild(h('span', {
+      style:{cursor:'pointer', textDecoration:'underline dotted'},
+      onclick: () => openFicha(e.uuid),
+      title: 'Abrir ficha del equipo',
+    }, e.nombre));
+  }
+  if (p.asignado) linea2.appendChild(h('span', `Asignado: ${p.asignado}`));
+  if (p.vence) {
+    const dias = fmt.daysSince(p.vence);
+    const txt = dias > 0
+      ? `Vence ${fmt.date(p.vence)} (hace ${dias}d)`
+      : dias < 0
+        ? `Vence ${fmt.date(p.vence)} (en ${Math.abs(dias)}d)`
+        : `Vence ${fmt.date(p.vence)} (hoy)`;
+    linea2.appendChild(h('span', txt));
+  }
+  if (p.creado) linea2.appendChild(h('span', `Creado ${fmt.rel(p.creado)}`));
+  head.appendChild(linea2);
+
+  // Línea 3: botón Gestionar / acción especial diff
+  const acciones = h('div', { style:{display:'flex', gap:'6px', marginTop:'6px', flexWrap:'wrap'} });
+  acciones.appendChild(h('button.btn.sm.ghost', { onclick: () => {
+    if (UI_PEND.expanded.has(p.id)) UI_PEND.expanded.delete(p.id);
+    else UI_PEND.expanded.add(p.id);
+    refresh();
+  } }, [
+    h('i.ti', { class:'ti ' + (isExpanded ? 'ti-chevron-up' : 'ti-chevron-down') }),
+    isExpanded ? 'Cerrar gestión' : 'Gestionar',
+  ]));
+  if (esDiff) {
+    acciones.appendChild(h('button.btn.sm', { onclick: () => abrirModalDiferenciasMaestro(p.meta.diff, { review:true, pendienteId: p.id }) }, [
+      h('i.ti.ti-eye'), 'Revisar diferencias',
+    ]));
+  }
+  head.appendChild(acciones);
+  card.appendChild(head);
+
+  // === Cuerpo expandible ===
+  if (isExpanded) {
+    card.appendChild(h('hr', { style:{margin:'10px 0', border:0, borderTop:'.5px solid var(--line)'} }));
+    card.appendChild(renderPendienteExpandido(p, refresh));
+  }
+
+  return card;
+}
+
+function renderPendienteExpandido(p, refresh) {
+  const wrap = h('div', { style:{display:'flex', flexDirection:'column', gap:'14px'} });
+
+  // Encabezado de gestión: estado + editar + reabrir
+  const headRow = h('div', { style:{display:'flex', alignItems:'center', gap:'10px', flexWrap:'wrap'} });
+  headRow.appendChild(h('label', { style:{fontSize:'12px', color:'var(--ink-3)'} }, 'Estado:'));
+  const selEstado = selectCtl(
+    ESTADOS_PENDIENTE.map(e => ({ value:e, label: ESTADO_PENDIENTE_LABEL[e] })),
+    p.estado,
+    { onchange: async (ev) => {
+      const nuevo = ev.target.value;
+      if (nuevo === 'Cerrado') {
+        const ok = await UI.dialog({ title:'Cerrar pendiente', message:'¿Marcar este pendiente como cerrado? Vas a poder reabrirlo después.', confirmText:'Cerrar' });
+        if (!ok) { selEstado.value = p.estado; return; }
+      }
+      try {
+        PENDIENTE.cambiarEstado(p.id, nuevo);
+        UI.toast(`Pendiente: ${ESTADO_PENDIENTE_LABEL[nuevo]}`, 'success');
+        refresh();
+      } catch (e) { bus.emit('error', e); selEstado.value = p.estado; }
+    } },
+  );
+  headRow.appendChild(selEstado);
+  headRow.appendChild(h('div', { style:{flex:1} }));
+  headRow.appendChild(h('button.btn.sm.ghost', { onclick: () => abrirModalEditarPendiente(p, refresh) }, [
+    h('i.ti.ti-edit'), 'Editar',
+  ]));
+  if (p.estado === 'Cerrado') {
+    headRow.appendChild(h('button.btn.sm', { onclick: async () => {
+      const ok = await UI.dialog({ title:'Reabrir pendiente', message:'¿Reabrir este pendiente?', confirmText:'Reabrir' });
+      if (!ok) return;
+      PENDIENTE.reabrir(p.id);
+      UI.toast('Pendiente reabierto.', 'info');
+      refresh();
+    } }, [ h('i.ti.ti-refresh'), 'Reabrir' ]));
+  }
+  wrap.appendChild(headRow);
+
+  // === Subtareas ===
+  const subSec = h('div');
+  subSec.appendChild(h('div', { style:{fontSize:'12px', color:'var(--ink-3)', textTransform:'uppercase', letterSpacing:'.04em', marginBottom:'6px', fontWeight:500} }, `Subtareas (${(p.subtareas||[]).length})`));
+  const subList = h('div', { style:{display:'flex', flexDirection:'column', gap:'4px', marginBottom:'8px'} });
+  (p.subtareas || []).forEach(s => {
+    const item = h('div', { style:{display:'flex', alignItems:'center', gap:'8px', fontSize:'12.5px'} }, [
+      h('input', { type:'checkbox', checked: !!s.completada, onchange: () => {
+        PENDIENTE.toggleSubtarea(p.id, s.id);
+        refresh();
+      } }),
+      h('span', { style:{flex:1, textDecoration: s.completada ? 'line-through' : 'none', color: s.completada ? 'var(--ink-3)' : 'var(--ink)'} }, s.texto),
+      h('button.btn.icon.ghost', { title:'Eliminar subtarea', onclick: () => {
+        PENDIENTE.eliminarSubtarea(p.id, s.id);
+        refresh();
+      } }, [ h('i.ti.ti-x', { style:{fontSize:'14px'} }) ]),
+    ]);
+    subList.appendChild(item);
+  });
+  if (!(p.subtareas || []).length) {
+    subList.appendChild(h('div', { style:{color:'var(--ink-4)', fontSize:'11.5px', fontStyle:'italic'} }, 'Sin subtareas.'));
+  }
+  subSec.appendChild(subList);
+  // Input nueva subtarea
+  const newSubInput = inputCtl({ placeholder:'Agregar subtarea (Enter para guardar)…', style:{flex:1} });
+  const newSubBtn = h('button.btn.sm', {
+    onclick: () => {
+      const t = newSubInput.value.trim();
+      if (!t) return;
+      PENDIENTE.agregarSubtarea(p.id, t);
+      newSubInput.value = '';
+      refresh();
+    },
+  }, [ h('i.ti.ti-plus'), 'Agregar' ]);
+  newSubInput.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); newSubBtn.click(); }
+  });
+  subSec.appendChild(h('div', { style:{display:'flex', gap:'6px'} }, [ newSubInput, newSubBtn ]));
+  wrap.appendChild(subSec);
+
+  // === Log / notas ===
+  const logSec = h('div');
+  logSec.appendChild(h('div', { style:{fontSize:'12px', color:'var(--ink-3)', textTransform:'uppercase', letterSpacing:'.04em', marginBottom:'6px', fontWeight:500} }, `Notas y log (${(p.log||[]).length})`));
+  // Form para agregar nota
+  const notaInput = textareaCtl({ rows:2, placeholder:'Agregar nota al log (Ctrl+Enter para guardar)…' });
+  const notaBtn = h('button.btn.sm', {
+    onclick: () => {
+      const t = notaInput.value.trim();
+      if (!t) return;
+      PENDIENTE.agregarNota(p.id, t);
+      notaInput.value = '';
+      refresh();
+    },
+  }, [ h('i.ti.ti-message-plus'), 'Agregar nota' ]);
+  notaInput.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); notaBtn.click(); }
+  });
+  logSec.appendChild(h('div', { style:{display:'flex', gap:'6px', alignItems:'flex-start', marginBottom:'10px'} }, [
+    h('div', { style:{flex:1} }, notaInput),
+    notaBtn,
+  ]));
+  // Log cronológico descendente
+  const logList = h('div', { style:{display:'flex', flexDirection:'column', gap:'6px'} });
+  const logSorted = (p.log || []).slice().sort((a,b) => new Date(b.ts || 0) - new Date(a.ts || 0));
+  logSorted.forEach(entry => {
+    logList.appendChild(h('div', { style:{display:'flex', gap:'10px', fontSize:'11.5px', paddingBottom:'4px', borderBottom:'.5px solid var(--line)'} }, [
+      h('span', { style:{color:'var(--ink-3)', fontVariantNumeric:'tabular-nums', whiteSpace:'nowrap', minWidth:'120px'} }, fmt.datetime(entry.ts)),
+      h('span', { style:{color:'var(--ink-2)', flex:1} }, entry.nota),
+    ]));
+  });
+  if (!logSorted.length) logList.appendChild(h('div', { style:{color:'var(--ink-4)', fontSize:'11.5px', fontStyle:'italic'} }, 'Sin entradas en el log.'));
+  logSec.appendChild(logList);
+  wrap.appendChild(logSec);
+
+  return wrap;
+}
+
+function abrirModalNuevoPendiente() {
   let snap = { descripcion:'', asignado:'', equipoUuid:'', vence: dateInputValue(addBusinessDays(new Date(), 3)) };
   UI.modal({
-    title: 'Nueva tarea',
+    title: 'Nuevo pendiente',
     size: 'sm',
     content: (body) => {
       body.appendChild(field('Descripción *', textareaCtl({ rows:3, oninput:(e)=> snap.descripcion = e.target.value })));
       body.appendChild(row('1fr 1fr', [
         field('Asignado a', selectTecnico(snap.asignado, { onchange:(e)=> snap.asignado = e.target.value })),
-        field('Vencimiento', dateCtl(snap.vence, { onchange:(e)=> snap.vence = e.target.value })),
+        field('Fecha de compromiso', dateCtl(snap.vence, { onchange:(e)=> snap.vence = e.target.value })),
       ]));
       const opts = [{ value:'', label:'(sin equipo)' }, ...STATE.equipos.slice(0,500).map(e => ({ value: e.uuid, label: `${e.nombre} · ${e.serie || e.inventario || ''}` }))];
       body.appendChild(field('Equipo (opcional)', selectCtl(opts, '', { onchange:(e)=> snap.equipoUuid = e.target.value })));
@@ -6222,10 +6663,47 @@ function abrirModalNuevaTarea() {
           equipoUuid: snap.equipoUuid || null,
           vence: snap.vence ? isoFromDateInput(snap.vence) : null,
         });
-        UI.toast('Tarea creada.', 'success');
+        UI.toast('Pendiente creado.', 'success');
         close('save');
         Router.go('tareas');
-      }}, 'Crear tarea'));
+      }}, 'Crear pendiente'));
+    },
+  });
+}
+
+function abrirModalEditarPendiente(p, refresh) {
+  let snap = {
+    descripcion: p.descripcion || '',
+    asignado:    p.asignado || '',
+    equipoUuid:  p.equipoUuid || '',
+    vence:       p.vence ? dateInputValue(p.vence) : '',
+  };
+  UI.modal({
+    title: 'Editar pendiente',
+    size: 'sm',
+    content: (body) => {
+      body.appendChild(field('Descripción *', textareaCtl({ rows:3, value: snap.descripcion, oninput:(e)=> snap.descripcion = e.target.value })));
+      body.appendChild(row('1fr 1fr', [
+        field('Asignado a', selectTecnico(snap.asignado, { onchange:(e)=> snap.asignado = e.target.value })),
+        field('Fecha de compromiso', dateCtl(snap.vence, { onchange:(e)=> snap.vence = e.target.value })),
+      ]));
+      const opts = [{ value:'', label:'(sin equipo)' }, ...STATE.equipos.slice(0,500).map(e => ({ value: e.uuid, label: `${e.nombre} · ${e.serie || e.inventario || ''}` }))];
+      body.appendChild(field('Equipo', selectCtl(opts, snap.equipoUuid, { onchange:(e)=> snap.equipoUuid = e.target.value })));
+    },
+    footer: (f, { close }) => {
+      f.appendChild(h('button.btn.ghost', { onclick: close }, 'Cancelar'));
+      f.appendChild(h('button.btn.primary', { onclick: () => {
+        if (!snap.descripcion.trim()) { bus.emit('error', new Error('Falta descripción.')); return; }
+        PENDIENTE.editar(p.id, {
+          descripcion: snap.descripcion.trim(),
+          asignado: snap.asignado,
+          equipoUuid: snap.equipoUuid || null,
+          vence: snap.vence ? isoFromDateInput(snap.vence) : null,
+        });
+        UI.toast('Pendiente actualizado.', 'success');
+        close('save');
+        refresh();
+      }}, 'Guardar cambios'));
     },
   });
 }
@@ -7058,6 +7536,8 @@ function boot() {
   try {
     const mig = migrateFromLegacy();
     loadState();
+    const migPend = migrarPendientesV33(STATE.pendientes);
+    if (migPend) { persist('pendientes'); console.info('[boot] migrarPendientesV33: ' + migPend + ' campos normalizados'); }
     renderNav();
     renderSessionChip();
     Theme.syncToggle();
@@ -7075,7 +7555,7 @@ function boot() {
     Router.go(STATE.equipos.length ? 'inv' : 'dash');
 
     if (mig.migrated && mig.counts && (mig.counts.equipos || mig.counts.pendientes)) {
-      UI.toast(`Migrados ${mig.counts.equipos} equipos · ${mig.counts.pendientes} tareas desde el sistema anterior.`, 'success', { duration: 6500 });
+      UI.toast(`Migrados ${mig.counts.equipos} equipos · ${mig.counts.pendientes} pendientes desde el sistema anterior.`, 'success', { duration: 6500 });
     }
   } catch (e) {
     console.error(e);
@@ -7097,6 +7577,9 @@ try {
     esDiffIgnorado, marcarDiffIgnorado, aplicarIgnoradosAlDiff,
     agruparPorTecnico, periodoActual, periodoLabel, responsableDelPeriodo,
     persist, loadState, normalize, fmt, h,
+    // R4
+    ESTADOS_PENDIENTE, ESTADO_PENDIENTE_LABEL, migrarPendientesV33, UI_PEND,
+    abrirModalNuevoPendiente, abrirModalEditarPendiente,
   };
 } catch {}
 </script>

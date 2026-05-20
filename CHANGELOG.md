@@ -1,5 +1,149 @@
 # Changelog
 
+## Fase 1 · Iteración R4 — Pendientes con gestión completa
+
+### 1. Renombrado "Tareas" → "Pendientes" en UI (ID interno preservado)
+
+- `NAV_ITEMS`: label `'Pendientes'`. ID interno sigue siendo `'tareas'`.
+- `VIEWS.tareas.title`, `viewHeader`, `topbar`: todos dicen "Pendientes".
+- Dashboard KPI: `'Pendientes abiertos'`.
+- Botón principal: `'Nuevo pendiente'`. Modal: `'Nuevo pendiente'` /
+  botón `'Crear pendiente'` / toast `'Pendiente creado.'`.
+- Toast del migrador legacy: `'X pendientes desde el sistema anterior'`.
+- Verificado por grep que ya no aparece "Tareas" / "tarea creada" en
+  strings visibles del HTML.
+
+### 2. Estados granulares del pendiente
+
+`ESTADOS_PENDIENTE = ['Abierto','EnCurso','Esperando','Cerrado']` con
+labels (`En curso`, etc.) y pills (info/warning/purple/success).
+
+`PENDIENTE.crear()` arranca en `'Abierto'`. Nuevas funciones:
+
+- `PENDIENTE.cambiarEstado(id, nuevoEstado, nota='')` con validación,
+  re-apertura limpia (`p.cerrado = p.cerradoEn = null`), entrada en log
+  con formato `Estado: anterior → nuevo · nota?`.
+- `PENDIENTE.reabrir(id, nota='')` — atajo a `cambiarEstado(id,'Abierto')`.
+
+`PENDIENTE.cerrar(id, nota)` mantenido por compatibilidad con el flujo
+SIGEM y los call sites existentes; ahora usa el mismo formato de log
+y setea `cerradoEn`.
+
+### 3. Campos extendidos y funciones de gestión
+
+Esquema actualizado (retrocompatible vía migración):
+
+- `subtareas: [{ id, texto, completada, ts }]` — array.
+- `log: [{ ts, nota }]` — usado para automáticos (estado, edición,
+  subtareas creadas/eliminadas) y notas manuales del usuario.
+- `vence` (alias funcional de `fechaCompromiso` viejo).
+
+Funciones nuevas:
+
+- `PENDIENTE.editar(id, cambios)` — campos editables: `descripcion`,
+  `asignado`, `vence`, `equipoUuid`, `tipo`. Registra diff en log.
+  Re-mantiene la consistencia de `equipos[].pendientesIds` si cambia
+  el equipo.
+- `PENDIENTE.agregarNota(id, nota)` — push al log.
+- `PENDIENTE.agregarSubtarea(id, texto)` — agrega subtarea + log.
+- `PENDIENTE.toggleSubtarea(id, subId)` — invierte completada, **sin
+  log** (sería ruidoso).
+- `PENDIENTE.eliminarSubtarea(id, subId)` — saca del array + log.
+
+### 4. Vista Pendientes con gestión inline
+
+Reescritura completa de `VIEWS.tareas.render()`.
+
+- **Filtros en vivo** en el header: `Estado` y `Responsable` (dropdown
+  de `TECNICOS_OFICIALES`). Estado volátil en `UI_PEND.filtros`.
+- **Agrupación por urgencia**: Vencidos · Por vencer (≤3d) · Abiertos ·
+  En curso · Esperando · Cerrados recientes (últimos 20). Cada grupo
+  con header `Nombre + pill de conteo de color semántico`.
+- **Card colapsable** por pendiente:
+  - Línea 1: descripción + pills (tipo, estado, vencido, `N/M subtareas`).
+  - Línea 2: equipo (clickeable), asignado, vence con días, creado.
+  - Botón `Gestionar ▾` que expande.
+- **Vista expandida** con:
+  - Selector de estado en vivo (con confirmación al cerrar).
+  - Subtareas con checkbox, input para agregar (Enter), botón × para
+    eliminar.
+  - Notas: textarea + botón "Agregar nota" (Ctrl+Enter). Log abajo
+    cronológico descendente con timestamp humano.
+  - Botón "Editar" arriba que abre modal con descripción / asignado /
+    vence / equipo.
+  - Si está Cerrado: botón `Reabrir` (con confirmación).
+- **Empty state diferenciado**:
+  - Sin pendientes en absoluto → empty state con CTA "Nuevo pendiente".
+  - Sin pendientes que cumplan filtros → empty state con CTA "Limpiar
+    filtros".
+
+### 5. Migración del esquema legacy (`migrarPendientesV33`)
+
+Función idempotente que se llama en boot después de `loadState`. Para
+cada pendiente:
+
+- `id` ← `uuid` si falta.
+- `subtareas = []` si falta.
+- `log = [{ ts: creado, nota: 'Creado' }]` si no es array.
+- `estado` desconocido → `'Abierto'` (warning en consola con el ID).
+- `vence` ← `fechaCompromiso` si falta y existe el legacy.
+- `asignado` ← `responsable` si falta y existe el legacy.
+
+Si modifica algo, persiste `pendientes` y loguea cuántos campos
+normalizó. Verificado idempotente: segunda llamada devuelve 0.
+
+### 6. Sección "Pendientes" en la ficha del equipo
+
+Las cards ahora:
+
+- Resuelven pendientes por `pendientesIds` Y por `equipoUuid` (más
+  defensivo si los ids se desincronizan).
+- Muestran pill de estado granular con color institucional.
+- Muestran badge `subDone/subN subtareas` si tiene.
+- Marcan `vencido hace Xd` si aplica.
+- Son clickeables: setean `UI_PEND.focusId = p.id`, limpian filtros, y
+  hacen `Router.go('tareas')`. La vista expande automáticamente esa
+  card y la resalta con animación `pendienteFlash` durante 2.5s
+  (border + box-shadow azul institucional).
+- Cierra el modal de ficha automáticamente al navegar.
+
+### 7. Pendiente automático SIGEM
+
+`CICLO.crear()` con `sigemEstado === 'falta'` sigue llamando a
+`PENDIENTE.crear()` con `tipo: 'sigem'`, descripción autocompletada,
+vencimiento 3 días hábiles y `meta.cicloUuid`. Sin lógica duplicada.
+
+Verificado: cerrar el pendiente SIGEM desde la nueva UI (cambiar
+estado a `Cerrado`) **no avanza el ciclo correctivo**. Arrancar el
+ciclo requiere el flujo existente "Completar folio SIGEM" que pide
+el folio antes.
+
+### Simulaciones R4
+
+| # | Flujo | Resultado |
+|---|-------|-----------|
+| Suite 1-15 + 4b/7 + R2 + R3 | Sin regresiones | OK · 25 sims verdes |
+| R4.1 | Renombrado UI Pendientes | OK · nav, dashboard KPI, vista, botones |
+| R4.2 | Abierto → EnCurso → Esperando → Cerrado → Reabrir | OK · 5 entradas de log con formato correcto |
+| R4.3 | Subtareas: agregar 3 / toggle 2 / eliminar 1, persistencia | OK · 2 subtareas en localStorage post-write · toggle no contamina log |
+| R4.4 | Agregar notas al log | OK · timestamps correctos |
+| R4.5 | Editar pendiente (descripción + vencimiento) | OK · log registra diffs |
+| R4.6 | Agrupación por urgencia y filtros | OK · 5 secciones, filtros Estado y Responsable funcionan |
+| R4.7 | Migración legacy `{uuid, fechaCompromiso, responsable, estado raro}` | OK · idempotente, ningún dato perdido |
+| R4.8 | Pendiente SIGEM auto y cierre manual | OK · creación correcta, cerrar no avanza ciclo |
+| R4.9 | Foco desde ficha del equipo | OK · `UI_PEND.focusId` expande la card y limpia filtros |
+
+### NO realizado intencionalmente
+
+- Fase 2 (Apps Script) sigue pausada. Los archivos en `apps-script/`
+  quedaron tal como estaban en iteraciones previas, sin tocar.
+- ID interno de la vista (`'tareas'`) preservado para no romper
+  deep-links ni el migrador desde legacy.
+- API existente (`PENDIENTE.crear`, `PENDIENTE.cerrar`) preservada;
+  todos los call sites siguen funcionando sin cambios.
+- Flujo "Completar folio SIGEM" (que arranca el ciclo) NO se reemplazó
+  por el cambio simple de estado del pendiente.
+
 ## Fase 1 · Iteración R3 — Solicitud de trabajo · Nombre completo · Plantilla institucional · Dropdowns bloqueados
 
 ### 1. Botón "+ Solicitud de trabajo" en la ficha
