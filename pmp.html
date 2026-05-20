@@ -479,15 +479,10 @@ hr { border: 0; border-top: .5px solid var(--line); margin: 0; }
   background: var(--paper);
   overflow-x: auto;
   overflow-y: visible;
-  /* AJUSTE R8 F.2: fade sutil en el borde derecho cuando hay overflow, como indicador
-     de scroll disponible. background-attachment local hace que el fade siga el scroll. */
-  background:
-    linear-gradient(to right, var(--paper) 30%, transparent),
-    linear-gradient(to right, transparent, var(--paper) 70%) right,
-    var(--paper);
-  background-size: 40px 100%, 40px 100%, 100% 100%;
-  background-repeat: no-repeat;
-  background-attachment: local, local, scroll;
+  /* AJUSTE R9 B.1: se eliminó el fade gradient compuesto de R8 F.2 (Opción 2 del prompt).
+     Aparecía como mancha clara en el borde derecho cuando la tabla cabía completa en el
+     wrap (pantallas anchas, presets de pocas columnas). El scroll horizontal nativo del
+     navegador es suficiente indicador visual y el cambio es de cero líneas de JS. */
 }
 .table-toolbar {
   display: flex;
@@ -526,7 +521,15 @@ hr { border: 0; border-top: .5px solid var(--line); margin: 0; }
   padding: 8px 12px;
   border-bottom: .5px solid var(--line);
   vertical-align: middle;
+  /* AJUSTE R8.1: nowrap por defecto en celdas. Sin esto, contenido largo
+     (p. ej. "Monitor Multiparámetros") se rompía en 2 líneas comprimiendo
+     la columna, y la tabla siempre cabía en el .table-wrap, anulando el
+     overflow-x:auto agregado en R8 F.1. Para wrap explícito en celdas
+     puntuales, usar la clase .wrap (definida abajo). */
+  white-space: nowrap;
 }
+.dt tbody td.wrap { white-space: normal; }
+.dt tbody td.wrap-2 { white-space: normal; max-width: 280px; }
 .dt tbody tr { cursor: pointer; }
 .dt tbody tr:hover { background: var(--paper-2); }
 .dt tbody tr.is-slot td { color: var(--ink-4); font-style: italic; }
@@ -565,7 +568,14 @@ hr { border: 0; border-top: .5px solid var(--line); margin: 0; }
   backdrop-filter: blur(2px);
   -webkit-backdrop-filter: blur(2px);
 }
-.backdrop.is-stacked { background: var(--backdrop-stacked); }
+.backdrop.is-stacked {
+  background: var(--backdrop-stacked);
+  /* AJUSTE R9 B.2: en modales apilados (sub-modal sobre modal), el blur del backdrop
+     ya está aplicado por el backdrop de fondo. Evitar componerlo dos veces para no
+     pesar en hardware viejo y evitar artefactos visuales. */
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes slide-up { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes slide-right { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: translateX(0); } }
@@ -6513,7 +6523,9 @@ function renderFichaTab(id, e) {
           h('td', resultadoPill(row.resultado)),
           h('td', row.estadoFinal ? ESTADO_LABEL[row.estadoFinal] || row.estadoFinal : '—'),
           h('td', row.ejecutor || '—'),
-          h('td.truncate', { title: row.obs||'' }, row.obs || ''),
+          /* AJUSTE R9 A.1: observación con wrap explícito (max-width:280px) para que
+             diagnósticos largos no fuercen scroll horizontal del historial. */
+          h('td.wrap-2', { title: row.obs||'' }, row.obs || ''),
         ]);
         tb.appendChild(tr);
       });
@@ -8831,7 +8843,9 @@ VIEWS.config = {
         tb.appendChild(h('tr', [
           h('td', eq ? eq.nombre : (ctx?.contexto?.nombre || equipoUuid.slice(0,8))),
           h('td', h('span.pill', tipo)),
-          h('td.truncate', detalle),
+          /* AJUSTE R9 A.2: detalle puede ser texto largo (descripción de diff de
+             grilla o campo). Wrap explícito en lugar de truncate con ellipsis. */
+          h('td.wrap-2', detalle),
           h('td', { style:{fontSize:'11px', color:'var(--ink-3)'} }, ctx?.ts ? fmt.rel(ctx.ts) : '—'),
           h('td', h('button.btn.sm.ghost', { onclick: () => {
             delete STATE.diffIgnorados[k];

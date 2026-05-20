@@ -1,5 +1,122 @@
 # Changelog
 
+## Fase 1 · Iteración R9 — Cierre de pendientes R8 + auditoría tablas
+
+Iteración correctiva sobre R8. Parte de un parche del PM (comentado
+`/* AJUSTE R8.1 ... */`) que añadió `white-space: nowrap` por defecto
+a `.dt tbody td` para que el scroll horizontal de R8 F.1 efectivamente
+disparara — sin nowrap, los textos largos como "Monitor Multiparámetros"
+se rompían en 2 líneas y la tabla siempre cabía en el wrap. R8.1 también
+agregó las clases de escape `.wrap` y `.wrap-2 (max-width:280px)`.
+
+R9 cierra: propagación de `.wrap-2` a celdas con texto legítimamente
+largo (A), y los 2 pendientes "Pendiente de revisar manualmente"
+documentados en R8 que dependían de código (B). Sin Fase 2 ni cambios
+de tokens.
+
+### Parte A — Propagar `.wrap-2` a celdas con texto largo
+
+Auditadas las 12 tablas `.dt` del DOM live. Decisiones:
+
+| Ubicación                                            | Columna     | Decisión       |
+|------------------------------------------------------|-------------|----------------|
+| Ficha · Historial MP (línea ~6515)                   | Observación | `wrap-2`       |
+| Configuración · Pendientes ignorados (línea ~8832)   | Detalle     | `wrap-2`       |
+| Modal "Equipos del KPI" (Entregas)                   | —           | nowrap (cortas)|
+| Modal "Filas sin match" (import asignación)          | —           | nowrap (cortas)|
+| Modal "Equipos del técnico" (Entregas)               | —           | nowrap (cortas)|
+| Vista Inventario (`VIEWS.inv`)                       | —           | nowrap         |
+| renderMes (calendario PMP)                           | —           | nowrap         |
+| renderAnio (grilla 12 meses)                         | —           | nowrap         |
+| Card pendientes de la ficha del equipo               | n/a (cards) | —              |
+| Tab "eventos" del ciclo correctivo                   | n/a (timeline) | —           |
+| Modal detalle de pendiente                           | n/a (card)  | —              |
+| Tabla del Anexo 1 PDF / ficha exportable             | n/a (string template, no DOM) | — |
+
+El cambio en A.1/A.2 reemplazó la clase `truncate` (max-width:240px +
+ellipsis) por `wrap-2` (max-width:280px + `white-space:normal`). Mantiene
+el `title` para hover en el caso del historial.
+
+### Parte B — Cierre de pendientes documentados en R8
+
+**B.1 — Fade gradient del `.table-wrap` (Opción 2 del prompt):** se
+eliminó el `background: linear-gradient(...)` compuesto de R8 F.2.
+Aparecía como mancha clara en el borde derecho aun cuando la tabla
+cabía completa en el wrap (presets de pocas columnas, pantallas anchas).
+Decisión: dejar sólo `background: var(--paper)` y confiar en el
+indicador nativo de scroll del navegador. Cero líneas de JS, cero
+listeners de resize, cero clase `.has-overflow`. Se prefirió la
+Opción 2 (sugerida como default en el prompt) sobre la Opción 1
+porque la complejidad de tracking de overflow no aportaba sobre el
+indicador nativo.
+
+**B.2 — Backdrop apilado sin blur compuesto:** `.backdrop.is-stacked`
+ahora declara `backdrop-filter: none; -webkit-backdrop-filter: none;`.
+La clase ya se aplicaba al segundo modal (UI.modal línea 2527:
+`if (stack.length) backdrop.classList.add('is-stacked')`). Resultado:
+al abrir "Equipos del técnico" sobre "Técnicos activos", el blur se
+mantiene en el backdrop de fondo (que ya separa del contenido) y NO se
+compone con un segundo blur del sub-modal, evitando carga gráfica en
+hardware viejo del servicio y artefactos visuales.
+
+**B.3 — Contraste de tokens:** intencionalmente NO se tocó. Pendiente
+para el smoke visual del usuario en la PC del SEC.
+
+### Parte C — Micro-fixes
+
+**C.1 — Botón "Volver al inicio" del table-wrap:** omitido. La
+implementación sugerida (`position: sticky; bottom:8px; marginLeft:auto`)
+no funciona limpiamente dentro del `.table-wrap`: `sticky` opera en eje
+vertical y el wrap no es flex, así que `marginLeft:auto` queda inerte.
+Resolverlo prolijo requiere un wrapper flex extra (>15 líneas, refactor
+estructural), prohibido por el prompt. El scroll nativo cubre el caso.
+
+### Verificaciones
+
+13/13 sims regresivas verdes (`sim_run`, `sim_3`, `sim_mp_ciclo`,
+`sim_views`, `sim_extras`, `sim_r2`-`sim_r8`, más nuevo `sim_r9.js`).
+
+`sim_r9.js` valida:
+
+1. Parche R8.1 presente: `.dt tbody td { white-space: nowrap }` + clases
+   `.wrap`/`.wrap-2 (max-width:280px)`.
+2. Historial MP renderiza celda Observación con clase `wrap-2`.
+3. Pendientes ignorados (config) renderiza celda Detalle con clase
+   `wrap-2`.
+4. `.table-wrap` no contiene `linear-gradient` y mantiene
+   `background: var(--paper)` + `overflow-x: auto`.
+5. `.backdrop.is-stacked` declara `backdrop-filter: none` (con prefijo
+   webkit), y el `.backdrop` base sigue con `blur(2px)`.
+6. Apilando 2 modales secuencialmente, el segundo backdrop recibe la
+   clase `is-stacked`.
+7. Las 14 funciones/símbolos públicos siguen expuestos en `window.__pmp`
+   (incluye `INV_COLUMNAS` con 18 columnas y `invGetPresets()` con 8
+   presets).
+
+Verificación manual sugerida (golden path 12 puntos del prompt):
+
+- 1–3 (Parte A): Inventario con 18 columnas en pantalla angosta scrollea
+  horizontal con "Monitor Multiparámetros" en 1 línea; ficha → historial
+  MP con observación de 100+ chars hace wrap a 280px; Configuración →
+  Pendientes ignorados con detalle largo hace wrap.
+- 4–6 (Parte B): tabla angosta sin fade visible; tabla ancha con scroll
+  nativo (sin fade, según Opción 2); sub-modal de "Equipos del técnico"
+  sin blur acumulado.
+- 7 (Parte C): omitido (no implementado).
+- 8 (regresiones): 9 vistas renderizan limpias.
+- 9–11: R8 A-H + 7 funciones públicas + 14 hooks → todo verificado por
+  `sim_r9.js` y suite previa.
+- 12: requiere backup pre-migrado del usuario (no disponible en sandbox,
+  cubierto por `sim_run.js` con maestro sintético).
+
+### Pendiente de revisar manualmente
+
+- **Contraste de tokens R8 B en la PC del SEC** (heredado, sigue pendiente
+  hasta que el usuario lo valide en monitor real).
+- **C.1 botón "Volver al inicio"**: si en uso real el scroll horizontal
+  del Inventario molesta para volver al ínicio, en R10 implementarlo
+  con un wrapper flex correcto en lugar de `position: sticky`.
+
 ## Fase 1 · Iteración R8 — Pulido visual y de jerarquía
 
 Iteración cosmética y de pequeñas afordancias. No toca el modelo del
