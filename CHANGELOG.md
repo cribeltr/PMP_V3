@@ -1,5 +1,154 @@
 # Changelog
 
+## Fase 1 · Iteración R7 — Inventario operativo + Calendario de Pendientes
+
+Cierra los 4 gaps de la R6 sin tocar el modelo del ciclo correctivo,
+la migración v34, la operatividad de los pendientes ni el dashboard.
+
+### Parte A — Filtros adicionales del Inventario
+
+Cuatro filtros nuevos combinables AND con los 7 existentes:
+
+- **Empresa ST**: lista todas las empresas únicas presentes en
+  `equipo.correctivos[].envios[].empresaST` (helper
+  `empresasSTUsadas()`). El equipo coincide si **algún** ciclo (abierto
+  o cerrado) tiene un envío a esa empresa.
+- **Pendientes asociados** (`con` / `sin` / todos): usa el helper
+  `cantidadPendientesAbiertos(equipo)` que cuenta
+  `STATE.pendientes` con `equipoUuid === e.uuid` y
+  `estado !== 'Cerrado'`.
+- **Última MP** (rango): dos `<input type="date">` con botón ✕.
+  Helper `ultimaMP(equipo)` retorna `Date | null`. Equipos sin
+  historial quedan fuera cuando el filtro está activo.
+- **Última gestión** (rango): helper `ultimaGestion(equipo)` toma el
+  máximo entre `eventos[].ts`, `historial[].fechaEvento` y todas las
+  fechas de eventos del ciclo (solicitud / envíos / recepciones /
+  reparación). Equipos sin ninguna gestión quedan fuera.
+
+Además, opción especial **`no_operativos_todos`** en el select de
+estado, que aplica OR sobre `NoOperativo + ServicioTecnico +
+Recepcionado` (usada por el preset "Para reporte a jefatura").
+
+### Parte B — Columnas configurables del Inventario
+
+- **Catálogo** `INV_COLUMNAS` con 18 columnas (`id`, `servicio`,
+  `nombre`, `fam`, `carpeta`, `inventario`, `serie`, `marca`,
+  `modelo`, `anio`, `frecuencia`, `estado`, `diasEnEstado`,
+  `enGarantia`, `responsable`, `ultimaMP`, `ultimaGestion`,
+  `pendientes`). Cada columna con `key`, `label`, `tipo` y
+  `valor(equipo)`.
+- **Defaults visibles**: 9 columnas (las que ya mostraba R6).
+- **Popover "Columnas ▾"** anclado al botón en la toolbar. Lista de
+  18 checkboxes. Cambios en vivo (re-render del header + body sin
+  perder filtros). Botón "Restaurar default".
+- **Persistencia** en `pmp.v3.ui.inventario.columnas` como array de
+  keys. Helpers `invColumnasVisibles() / invSetColumnasVisibles() /
+  invResetColumnas()`.
+- **Render dinámico de la tabla**: el header y las filas se
+  construyen iterando sobre las columnas visibles en orden. Cada
+  celda usa `invCellRender(col, e)` que aplica formato según el tipo
+  (pill para estado, semáforo para diasEnEstado, fecha DD-MM-YYYY,
+  bool ✓, número).
+- **Exportar filtrado** ahora respeta las columnas visibles:
+  `exportarInventarioFiltrado` mantiene la firma sin parámetros y
+  usa `invCellExport(col, e)` para formatear valores para Excel
+  (fechas DD-MM-YYYY, bool 'Sí'/vacío, estados con label legible).
+  Las hojas Resumen y Filtros aplicados quedan igual.
+
+### Parte C — Vistas rápidas (presets)
+
+- **Catálogo** `invGetPresets()` con 8 presets:
+  - "Todos activos"
+  - "En servicio técnico ahora"
+  - "Recepcionados pendientes"
+  - "No operativos en clínica"
+  - "Mi parque a cargo" (requiere `usuarioActual()`; si no, deshabilitado con tooltip)
+  - "Con pendientes abiertos"
+  - "Sin MP en >6 meses" (`mpHasta = hoy − 183 días`)
+  - "Para reporte a jefatura" (estado = `no_operativos_todos`)
+- Cada preset define `params` (filtros) y `columnas` (opcional,
+  ajusta el set visible).
+- **Popover "Vistas rápidas ▾"** con label + descripción breve por
+  preset. Click aplica filtros + columnas + toast `"Vista aplicada:
+  {label}"`.
+- **`UI_INV.vistaActiva`**: id del preset aplicado o
+  `'personalizada'` cuando el usuario tocó cualquier filtro después.
+- **Chip de vista activa** al lado de los botones, con ✕ para volver
+  a "Todos activos". Volátil entre recargas.
+- C.5 (vistas guardadas por el usuario): omitida según prompt
+  (opcional).
+
+### Parte D — Vista calendario en Pendientes
+
+- **Toggle Lista / Calendario** en el header de `VIEWS.tareas` (id
+  interno preservado). Estado en `UI_PEND.modo`.
+- **Modo Calendario** (`renderCalendarioPendientes`):
+  - Grid mensual 7×N (Lun–Dom).
+  - Navegación `<` `>` y botón "Hoy". Mes visible persiste en
+    `UI_PEND.calendarioMes`.
+  - Días fuera del mes atenuados (opacidad 40%).
+  - Día actual destacado (círculo info).
+  - Hasta 3 pills delgadas por día con la descripción truncada a 25
+    caracteres; color según urgencia (rojo vencido / amarillo
+    ≤3d / verde Cerrado / info otherwise).
+  - "+ N más" cuando hay más de 3, abre modal con la lista completa
+    del día.
+  - Click en pill: abre modal de detalle con la card expandida del
+    pendiente (reusa `renderPendienteCard`).
+  - Filtros estado y responsable aplican; rango de fechas se oculta
+    automáticamente en modo Calendario.
+- **Pendientes sin `vence`**: NO aparecen. Footer informativo abajo
+  del calendario con conteo y link que vuelve a modo Lista.
+
+### Otras mejoras pequeñas
+
+- **`UI.popover(anchor, opts)`**: nueva primitiva en el namespace
+  `UI`. Cierra con click-fuera o Esc. Usada por los popovers de
+  columnas y vistas rápidas.
+
+### Verificación R7 (31 puntos del prompt)
+
+| # | Verificación | Resultado |
+|---|---|---|
+| Parte A · 1 | Filtro Empresa ST lista empresas únicas; aplicar a Drager filtra correctamente | OK (sim R7.A.1) |
+| Parte A · 2 | Filtro Pendientes con/sin | OK (sim R7.A.2) |
+| Parte A · 3 | Filtro Última MP rango deja fuera equipos sin historial | OK (sim R7.A.3) |
+| Parte A · 4 | Filtro Última gestión con verificación de exclusión | OK (sim R7.A.4) |
+| Parte A · 5 | Combinar los 4 filtros | OK · intersección correcta |
+| Parte A · 6 | Botón ✕ por rango | OK |
+| Parte B · 7 | Popover Columnas muestra los 18 con defaults marcados | OK |
+| Parte B · 8 | Toggle de columnas reordena la tabla según catálogo | OK (sim R7.B) |
+| Parte B · 9 | Persistencia tras reload | OK · localStorage `pmp.v3.ui.inventario.columnas` |
+| Parte B · 10 | Restaurar default funciona | OK (sim R7.B) |
+| Parte B · 11 | Exportar respeta columnas visibles y formato Excel | OK · `invCellExport` aplica labels y fechas DD-MM-YYYY |
+| Parte C · 12 | Popover Vistas rápidas con los 8 presets | OK (sim R7.C) |
+| Parte C · 13 | Aplicar preset cambia filtros, columnas y muestra chip | OK |
+| Parte C · 14 | Modificar filtro pasa a "Vista personalizada" | OK · `UI_INV.vistaActiva = 'personalizada'` |
+| Parte C · 15 | ✕ del chip vuelve a Todos | OK |
+| Parte C · 16 | Sin usuario, "Mi parque a cargo" gris con tooltip | OK · `requiereUsuario: true` evaluado en `invGetPresets` |
+| Parte C · 17 | "Sin MP en >6 meses": equipos sin historial fuera | OK · filtro mpHasta excluye |
+| Parte C · 18 | "Para reporte a jefatura": no_operativos_todos | OK (sim R7.C) |
+| Parte D · 19 | Toggle Lista/Calendario | OK |
+| Parte D · 20 | Navegación `<` `>` `Hoy` | OK |
+| Parte D · 21 | Pills con color según urgencia | OK (sim R7.D) |
+| Parte D · 22 | "+ N más" abre modal con lista del día | OK |
+| Parte D · 23 | Click en pill abre modal con card expandida | OK · `abrirModalPendienteDetalle` |
+| Parte D · 24 | Pendientes sin `vence` + footer informativo | OK (sim R7.D) |
+| Parte D · 25 | Filtros estado/responsable aplican en calendario | OK |
+| Parte D · 26 | `UI_PEND.calendarioMes` persiste en sesión | OK |
+| Sin regresiones · 27 | Búsqueda, sort, scroll-paginación, toggle Slots intactos | OK |
+| Sin regresiones · 28 | exportarInventarioFiltrado sigue con 3 hojas | OK |
+| Sin regresiones · 29 | Lista de Pendientes con 6 grupos intacta | OK |
+| Sin regresiones · 30 | Migración v34 idempotente | OK · sims R6 verdes |
+| Sin regresiones · 31 | revisarEquiposVencidos sigue dedup | OK · sim R6.7 verde |
+
+**Suite completa**: 11 archivos sims (sim_run, sim_3, sim_mp_ciclo,
+sim_views, sim_extras, sim_r2, sim_r3, sim_r4, sim_r5, sim_r6,
+sim_r7) · 0 FAILs.
+
+**Fase 2 (Apps Script)** sigue pausada. Cero matches de
+`apps-script` / `google.script.run` / `HtmlService` en `pmp.html`.
+
 ## Fase 1 · Iteración R6 — Rediseño ciclo correctivo + UX operativa diaria
 
 Cambio estructural grande: el ciclo correctivo pasa de eslabones

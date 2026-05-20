@@ -2210,6 +2210,53 @@ function diasEnEstadoActual(equipo) {
   return Math.round((ms / 86400000) * 10) / 10;
 }
 
+/** Fecha de la última MP del equipo (Date | null). */
+function ultimaMP(equipo) {
+  const hist = equipo.historial || [];
+  if (!hist.length) return null;
+  let best = null;
+  hist.forEach(h => {
+    const t = h.fechaEvento || h.fecha;
+    if (!t) return;
+    const d = new Date(t);
+    if (isNaN(d)) return;
+    if (!best || d > best) best = d;
+  });
+  return best;
+}
+
+/** Fecha de la última gestión del equipo (Date | null): max entre eventos, historial y eventos del ciclo. */
+function ultimaGestion(equipo) {
+  let best = null;
+  const acc = (t) => {
+    if (!t) return;
+    const d = new Date(t);
+    if (isNaN(d)) return;
+    if (!best || d > best) best = d;
+  };
+  (equipo.eventos || []).forEach(ev => acc(ev.ts));
+  (equipo.historial || []).forEach(h => acc(h.fechaEvento || h.fecha));
+  (equipo.correctivos || []).forEach(c => {
+    acc(c.solicitud?.fechaEvento);
+    (c.envios || []).forEach(en => acc(en.fechaEvento));
+    (c.recepciones || []).forEach(r => acc(r.fechaEvento));
+    acc(c.reparacion?.fechaEvento);
+  });
+  return best;
+}
+
+/** Cantidad de pendientes abiertos vinculados al equipo. */
+function cantidadPendientesAbiertos(equipo) {
+  return STATE.pendientes.filter(p => p.equipoUuid === equipo.uuid && p.estado !== 'Cerrado').length;
+}
+
+/** Set de empresas ST usadas en cualquier ciclo de cualquier equipo. */
+function empresasSTUsadas() {
+  const s = new Set();
+  STATE.equipos.forEach(e => (e.correctivos || []).forEach(c => (c.envios || []).forEach(en => { if (en.empresaST) s.add(en.empresaST); })));
+  return Array.from(s).sort((a,b) => a.localeCompare(b,'es'));
+}
+
 function pushEvento(equipo, ev) {
   equipo.eventos = equipo.eventos || [];
   equipo.eventos.push({
@@ -2543,7 +2590,39 @@ const UI = (() => {
     return api;
   }
 
-  return { modal, dialog, drawer, toast };
+  /**
+   * Popover anclado a un elemento. Cierra al click fuera o Esc.
+   * @param anchor HTMLElement
+   * @param opts { width?, render(body, { close }), align?: 'left'|'right' }
+   */
+  function popover(anchor, opts={}) {
+    const rect = anchor.getBoundingClientRect();
+    const pop = h('div.popover', { style:{
+      position:'fixed', zIndex:'var(--z-popover)',
+      top: (rect.bottom + 6) + 'px',
+      [opts.align === 'right' ? 'right' : 'left']: (opts.align === 'right' ? (window.innerWidth - rect.right) : rect.left) + 'px',
+      background:'var(--paper)', border:'.5px solid var(--line-2)', borderRadius:'var(--r-md)',
+      boxShadow: 'var(--shadow-3)', minWidth:'220px', maxWidth: (opts.width || 340) + 'px',
+      maxHeight: '70vh', overflowY: 'auto', padding: '8px',
+    } });
+    document.body.appendChild(pop);
+    function close() {
+      if (!pop.isConnected) return;
+      pop.remove();
+      document.removeEventListener('mousedown', outside, true);
+      document.removeEventListener('keydown', keyHandler, true);
+    }
+    function outside(e) { if (!pop.contains(e.target) && e.target !== anchor && !anchor.contains(e.target)) close(); }
+    function keyHandler(e) { if (e.key === 'Escape') close(); }
+    setTimeout(() => {
+      document.addEventListener('mousedown', outside, true);
+      document.addEventListener('keydown', keyHandler, true);
+    }, 0);
+    if (typeof opts.render === 'function') opts.render(pop, { close });
+    return { close, root: pop };
+  }
+
+  return { modal, dialog, drawer, toast, popover };
 })();
 
 /* ============================================================
@@ -5790,17 +5869,23 @@ function emptyState({ icon, title, desc, actions=[] }) {
 VIEWS.inv = {
   title: 'Inventario',
   render(root, params) {
-    // Preferencia persistente para mostrar slots; viewParams.showSlots la sobreescribe (click en KPI del dashboard).
+    // Preferencia persistente de mostrar slots; viewParams.showSlots la sobreescribe.
     const showSlotsPref = (() => {
       try { return localStorage.getItem('pmp.v3.ui.inventario.showSlots') === '1'; } catch { return false; }
     })();
     const showSlots = (params && typeof params.showSlots === 'boolean') ? params.showSlots : showSlotsPref;
-
     const periodoFiltro = params?.periodo || periodoActual();
-
     const filters = Object.assign({
-      q: '', servicio: '', familia: '', estado: '', responsable: '', garantia: '',
+      q:'', servicio:'', familia:'', estado:'', responsable:'', garantia:'',
+      tiempoEstado:'', empresaST:'', pendientes:'',
+      mpDesde:'', mpHasta:'', gestionDesde:'', gestionHasta:'',
     }, params || {});
+
+    // Header con botones globales
+    const colsBtn = h('button.btn', [ h('i.ti.ti-columns'), 'Columnas ▾' ]);
+    colsBtn.onclick = (ev) => abrirPopoverColumnas(ev.currentTarget, () => { recargar(); });
+    const vistasBtn = h('button.btn', [ h('i.ti.ti-list'), 'Vistas rápidas ▾' ]);
+    vistasBtn.onclick = (ev) => abrirPopoverVistas(ev.currentTarget, (preset) => aplicarPreset(preset));
 
     const headerEl = viewHeader({
       title: 'Inventario',
@@ -5815,8 +5900,7 @@ VIEWS.inv = {
 
     if (STATE.equipos.length === 0) {
       root.appendChild(emptyState({
-        icon: 'ti-stethoscope',
-        title: 'Sin inventario',
+        icon: 'ti-stethoscope', title: 'Sin inventario',
         desc: 'Importá el Excel maestro o restaurá un backup JSON.',
         actions: [
           { label: 'Importar maestro', icon: 'ti-file-spreadsheet', primary: true, onclick: handleImportMaestro },
@@ -5826,24 +5910,41 @@ VIEWS.inv = {
       return;
     }
 
+    // Barra de vistas: chip + botones Vistas/Columnas
+    const chipVista = h('span', { style:{fontSize:'12.5px', color:'var(--ink-3)', display:'flex', alignItems:'center', gap:'4px', padding:'4px 8px', background:'var(--paper-2)', borderRadius:'4px'} });
+    function refreshChipVista() {
+      chipVista.innerHTML = '';
+      const id = UI_INV.vistaActiva;
+      if (!id || id === 'todos') { chipVista.style.display = 'none'; return; }
+      chipVista.style.display = '';
+      const preset = invGetPresets().find(p => p.id === id);
+      const label = preset ? preset.label : 'Vista personalizada';
+      chipVista.appendChild(h('span', label));
+      chipVista.appendChild(h('button.btn.icon.ghost', { style:{padding:'0 2px'}, title:'Volver a Todos activos', onclick: () => aplicarPreset(invGetPresets()[0]) }, [ h('i.ti.ti-x', { style:{fontSize:'13px'} }) ]));
+    }
+    const vistaBar = h('div', { style:{display:'flex', gap:'8px', alignItems:'center', marginBottom:'10px'} }, [
+      vistasBtn, colsBtn, chipVista,
+    ]);
+    root.appendChild(vistaBar);
+
     const tableWrap = h('div.table-wrap');
 
-    // toolbar
+    // === Filtros ===
     const search = h('div.search', [
       h('i.ti.ti-search'),
       h('input', { type:'text', placeholder:'Buscar por nombre, serie, inventario, marca…', value: filters.q }),
     ]);
-
-    // Responsable: opciones del período activo (asignaciones cargadas) + "(sin asignar)"
     const respPeriodo = EQ.responsablesPeriodo(periodoFiltro);
-    const respOpts = [
-      ...respPeriodo,
-      '(sin asignar)',
-    ];
+    const respOpts = [...respPeriodo, '(sin asignar)'];
+    const empresas = empresasSTUsadas();
 
     const selServicio = selectField('Servicio', '', EQ.servicios(), filters.servicio);
     const selFamilia  = selectField('Familia',  '', EQ.familias(),  filters.familia);
-    const selEstado   = selectField('Estado',   '', ESTADOS.map(s => ({ value: s, label: ESTADO_LABEL[s] })), filters.estado);
+    const selEstado   = selectField('Estado', '', [
+      ...ESTADOS.map(s => ({ value: s, label: ESTADO_LABEL[s] })),
+      { value:'no_operativos_todos', label:'No operativos (todos)' },
+    ], filters.estado);
+    const selEmpresaST= selectField('Empresa ST', '', empresas, filters.empresaST);
     const selResp     = selectField(`Resp. ${periodoLabel(periodoFiltro)}`, '', respOpts, filters.responsable);
     const selGar      = selectField('Garantía', '', [{value:'si',label:'En garantía'},{value:'no',label:'Sin garantía'}], filters.garantia);
     const selTiempo   = selectField('Tiempo en estado', '', [
@@ -5851,8 +5952,28 @@ VIEWS.inv = {
       { value:'15', label:'>15 días' },
       { value:'30', label:'>30 días' },
     ], filters.tiempoEstado || '');
+    const selPend     = selectField('Pendientes', '', [
+      { value:'con', label:'Con pendientes abiertos' },
+      { value:'sin', label:'Sin pendientes abiertos' },
+    ], filters.pendientes || '');
 
-    // Toggle slots: visible siempre, default OFF, persistido
+    // Rangos de fecha (MP, gestión) — pares + botón ✕ por rango
+    const inpMPDesde   = h('input.input', { type:'date', value: filters.mpDesde,    style:{maxWidth:'130px'}, onchange:(e) => applyFilters() });
+    const inpMPHasta   = h('input.input', { type:'date', value: filters.mpHasta,    style:{maxWidth:'130px'}, onchange:(e) => applyFilters() });
+    const inpGestDesde = h('input.input', { type:'date', value: filters.gestionDesde, style:{maxWidth:'130px'}, onchange:(e) => applyFilters() });
+    const inpGestHasta = h('input.input', { type:'date', value: filters.gestionHasta, style:{maxWidth:'130px'}, onchange:(e) => applyFilters() });
+    const btnLimpMP   = h('button.btn.icon.ghost', { title:'Limpiar rango de MP',     onclick: () => { inpMPDesde.value = ''; inpMPHasta.value = ''; applyFilters(); } }, [ h('i.ti.ti-x', { style:{fontSize:'13px'} }) ]);
+    const btnLimpGest = h('button.btn.icon.ghost', { title:'Limpiar rango de gestión', onclick: () => { inpGestDesde.value = ''; inpGestHasta.value = ''; applyFilters(); } }, [ h('i.ti.ti-x', { style:{fontSize:'13px'} }) ]);
+    const fechasMP   = h('div', { style:{display:'flex', alignItems:'center', gap:'4px'} }, [
+      h('span', { style:{fontSize:'11px', color:'var(--ink-3)'} }, 'MP desde'), inpMPDesde,
+      h('span', { style:{fontSize:'11px', color:'var(--ink-3)'} }, 'hasta'), inpMPHasta, btnLimpMP,
+    ]);
+    const fechasGest = h('div', { style:{display:'flex', alignItems:'center', gap:'4px'} }, [
+      h('span', { style:{fontSize:'11px', color:'var(--ink-3)'} }, 'Gestión desde'), inpGestDesde,
+      h('span', { style:{fontSize:'11px', color:'var(--ink-3)'} }, 'hasta'), inpGestHasta, btnLimpGest,
+    ]);
+
+    // Toggle slots
     const slotToggle = h('label', {
       style:{ display:'flex', alignItems:'center', gap:'6px', padding:'6px 10px', border:'.5px solid var(--line-2)', borderRadius:'var(--r-md)', cursor:'pointer', fontSize:'12px', whiteSpace:'nowrap' },
       title: 'Slots disponibles son posiciones sin equipo asignado',
@@ -5860,7 +5981,6 @@ VIEWS.inv = {
       h('input', { type:'checkbox', checked: showSlots, style:{margin:0}, onchange: (e) => {
         const v = e.target.checked;
         try { localStorage.setItem('pmp.v3.ui.inventario.showSlots', v ? '1' : '0'); } catch {}
-        // Pasamos el override por params para que persista en este viewParams stack
         Router.go('inv', Object.assign({}, currentParams(), { showSlots: v }));
       }}),
       h('span', 'Mostrar slots'),
@@ -5872,44 +5992,67 @@ VIEWS.inv = {
         servicio: selServicio.querySelector('select').value,
         familia:  selFamilia.querySelector('select').value,
         estado:   selEstado.querySelector('select').value,
+        empresaST: selEmpresaST.querySelector('select').value,
         responsable: selResp.querySelector('select').value,
         garantia: selGar.querySelector('select').value,
         tiempoEstado: selTiempo.querySelector('select').value,
+        pendientes: selPend.querySelector('select').value,
+        mpDesde:    inpMPDesde.value,
+        mpHasta:    inpMPHasta.value,
+        gestionDesde: inpGestDesde.value,
+        gestionHasta: inpGestHasta.value,
         periodo: periodoFiltro,
       };
     }
 
     const toolbar = h('div.table-toolbar', [
       search,
-      h('div.right', { style:{gap:'6px'} }, [ selServicio, selFamilia, selEstado, selResp, selGar, selTiempo, slotToggle,
-        h('button.btn.ghost.sm', { onclick: () => Router.go('inv', {}) }, [ h('i.ti.ti-x'), 'Limpiar' ]),
+      h('div.right', { style:{gap:'6px', flexWrap:'wrap'} }, [
+        selServicio, selFamilia, selEstado, selEmpresaST, selResp, selGar, selTiempo, selPend,
+        fechasMP, fechasGest, slotToggle,
+        h('button.btn.ghost.sm', { onclick: () => { UI_INV.vistaActiva = null; Router.go('inv', {}); } }, [ h('i.ti.ti-x'), 'Limpiar' ]),
       ]),
     ]);
 
     const meta = h('div.table-meta', '');
     const tbl = h('table.dt');
-    tbl.innerHTML = `<thead><tr>
-      <th>ID</th>
-      <th>Servicio</th>
-      <th>Equipo</th>
-      <th>Carpeta</th>
-      <th>Inventario</th>
-      <th>Serie</th>
-      <th>Marca / Modelo</th>
-      <th>Frec.</th>
-      <th>Estado</th>
-      <th>Días en estado</th>
-    </tr></thead>`;
+    const thead = h('thead');
     const tb = h('tbody');
+    tbl.appendChild(thead);
     tbl.appendChild(tb);
 
     tableWrap.appendChild(toolbar);
     tableWrap.appendChild(meta);
     tableWrap.appendChild(tbl);
-
     root.appendChild(tableWrap);
 
-    // dynamic list state
+    function renderHeader() {
+      thead.innerHTML = '';
+      const tr = h('tr');
+      invColumnasVisibles().forEach(key => {
+        const col = INV_COLUMNAS.find(c => c.key === key);
+        if (col) tr.appendChild(h('th', col.label));
+      });
+      thead.appendChild(tr);
+    }
+    renderHeader();
+
+    function rowEquipoDinamico(e) {
+      const tr = h('tr', { onclick: () => openFicha(e.uuid) });
+      if (e.esSlot) tr.classList.add('is-slot');
+      invColumnasVisibles().forEach(key => {
+        const col = INV_COLUMNAS.find(c => c.key === key);
+        if (!col) return;
+        const node = invCellRender(col, e);
+        const td = h(col.tipo === 'numero' || col.tipo === 'fecha' ? 'td.col-mono' : 'td');
+        if (node instanceof Node) td.appendChild(node);
+        else td.appendChild(document.createTextNode(node == null ? '—' : String(node)));
+        tr.appendChild(td);
+      });
+      return tr;
+    }
+
+    // === Estado dinámico (paginación) ===
     let rendered = 0;
     const PAGE = 80;
     let current = [];
@@ -5917,44 +6060,190 @@ VIEWS.inv = {
     function applyFilters() {
       const f = Object.assign({}, currentParams(), { slot: showSlots ? '' : 'no' });
       const q = f.q;
-      current = EQ.search(q, f);
-      // Filtro post-search: tiempo en estado
+
+      // Caso especial: estado = 'no_operativos_todos' aplica OR sobre los 3 estados no-op.
+      let baseList;
+      if (f.estado === 'no_operativos_todos') {
+        // pasamos estado:'' a EQ.search y luego filtramos manualmente
+        baseList = EQ.search(q, Object.assign({}, f, { estado: '' }));
+        baseList = baseList.filter(e => ESTADOS_NO_OPERATIVOS.includes(e.estado));
+      } else {
+        baseList = EQ.search(q, f);
+      }
+
+      // Filtros R7
+      if (f.empresaST) {
+        baseList = baseList.filter(e => (e.correctivos || []).some(c => (c.envios || []).some(en => en.empresaST === f.empresaST)));
+      }
+      if (f.pendientes === 'con') baseList = baseList.filter(e => cantidadPendientesAbiertos(e) > 0);
+      else if (f.pendientes === 'sin') baseList = baseList.filter(e => cantidadPendientesAbiertos(e) === 0);
+
+      if (f.mpDesde || f.mpHasta) {
+        const dDesde = f.mpDesde ? new Date(f.mpDesde + 'T00:00:00').getTime() : null;
+        const dHasta = f.mpHasta ? new Date(f.mpHasta + 'T23:59:59').getTime() : null;
+        baseList = baseList.filter(e => {
+          const u = ultimaMP(e); if (!u) return false;
+          const t = u.getTime();
+          if (dDesde != null && t < dDesde) return false;
+          if (dHasta != null && t > dHasta) return false;
+          return true;
+        });
+      }
+      if (f.gestionDesde || f.gestionHasta) {
+        const dDesde = f.gestionDesde ? new Date(f.gestionDesde + 'T00:00:00').getTime() : null;
+        const dHasta = f.gestionHasta ? new Date(f.gestionHasta + 'T23:59:59').getTime() : null;
+        baseList = baseList.filter(e => {
+          const u = ultimaGestion(e); if (!u) return false;
+          const t = u.getTime();
+          if (dDesde != null && t < dDesde) return false;
+          if (dHasta != null && t > dHasta) return false;
+          return true;
+        });
+      }
+
+      // Filtro tiempo en estado
       if (f.tiempoEstado) {
         const umbral = Number(f.tiempoEstado);
-        current = current.filter(e => {
+        baseList = baseList.filter(e => {
           if (!ESTADOS_NO_OPERATIVOS.includes(e.estado)) return false;
           const d = diasEnEstadoActual(e);
           return d != null && d > umbral;
         });
       }
-      current.sort((a,b) => (a.servicio||'').localeCompare(b.servicio||'','es') || (a.nombre||'').localeCompare(b.nombre||'','es'));
-      tb.innerHTML = '';
-      rendered = 0;
+
+      current = baseList.sort((a,b) => (a.servicio||'').localeCompare(b.servicio||'','es') || (a.nombre||'').localeCompare(b.nombre||'','es'));
+      tb.innerHTML = ''; rendered = 0;
       const extra = showSlots ? '' : ` · ${fmt.number(STATE.equipos.filter(e => e.esSlot).length)} slots ocultos`;
       meta.textContent = `${fmt.number(current.length)} equipos coinciden con los filtros${extra}`;
-      // Guardar el snapshot filtrado para exportar
       INV_LAST_FILTERED = current;
       INV_LAST_FILTROS = f;
+      // Si filtros activos != preset actual, marcar como personalizada (pero solo si había un preset distinto a 'todos').
+      if (UI_INV.vistaActiva && UI_INV.vistaActiva !== 'personalizada' && UI_INV.vistaActiva !== 'todos') {
+        // Hash rápido para comparar contra el preset
+        UI_INV.vistaActiva = 'personalizada';
+        refreshChipVista();
+      }
+      // Mostrar/ocultar botones limpiar de rangos
+      btnLimpMP.style.display = (f.mpDesde || f.mpHasta) ? '' : 'none';
+      btnLimpGest.style.display = (f.gestionDesde || f.gestionHasta) ? '' : 'none';
       renderMore();
     }
+
     function renderMore() {
       const slice = current.slice(rendered, rendered + PAGE);
-      slice.forEach(e => tb.appendChild(rowForEquipo(e)));
+      slice.forEach(e => tb.appendChild(rowEquipoDinamico(e)));
       rendered += slice.length;
       if (rendered >= current.length) sentinel.style.display = 'none';
       else sentinel.style.display = '';
     }
-    const sentinel = h('tr', { style:{} }, [ h('td', { colspan: 10, style:{textAlign:'center', color:'var(--ink-3)', padding:'10px', fontSize:'11.5px'} }, 'Cargando más…') ]);
-    tb.parentNode.appendChild(sentinel); // outside tbody (browser tolerates)
+
+    const sentinel = h('tr', { style:{} }, [ h('td', { colspan: 99, style:{textAlign:'center', color:'var(--ink-3)', padding:'10px', fontSize:'11.5px'} }, 'Cargando más…') ]);
+    tb.parentNode.appendChild(sentinel);
     const io = new IntersectionObserver(entries => entries.forEach(en => { if (en.isIntersecting && rendered < current.length) renderMore(); }), { rootMargin: '120px' });
 
-    search.querySelector('input').addEventListener('input', applyFilters);
-    [selServicio, selFamilia, selEstado, selResp, selGar, selTiempo].forEach(s => s.querySelector('select').addEventListener('change', applyFilters));
+    function recargar() {
+      // re-render solo del header + body (no de los filtros)
+      renderHeader();
+      applyFilters();
+    }
+    function aplicarPreset(preset) {
+      // Construir params combinando defaults + preset.params
+      const defaultParams = { q:'', servicio:'', familia:'', estado:'', responsable:'', garantia:'', tiempoEstado:'', empresaST:'', pendientes:'', mpDesde:'', mpHasta:'', gestionDesde:'', gestionHasta:'' };
+      const p = Object.assign({}, defaultParams, preset.params || {});
+      // Setear valores en controles
+      search.querySelector('input').value = p.q || '';
+      selServicio.querySelector('select').value = p.servicio || '';
+      selFamilia.querySelector('select').value = p.familia || '';
+      selEstado.querySelector('select').value = p.estado || '';
+      selEmpresaST.querySelector('select').value = p.empresaST || '';
+      selResp.querySelector('select').value = p.responsable || '';
+      selGar.querySelector('select').value = p.garantia || '';
+      selTiempo.querySelector('select').value = p.tiempoEstado || '';
+      selPend.querySelector('select').value = p.pendientes || '';
+      inpMPDesde.value = p.mpDesde || ''; inpMPHasta.value = p.mpHasta || '';
+      inpGestDesde.value = p.gestionDesde || ''; inpGestHasta.value = p.gestionHasta || '';
+      // Aplicar columnas si vienen en el preset
+      if (Array.isArray(preset.columnas) && preset.columnas.length) invSetColumnasVisibles(preset.columnas);
+      // Marcar vista activa, re-render, toast
+      UI_INV.vistaActiva = preset.id;
+      refreshChipVista();
+      renderHeader();
+      // Cuando applyFilters se ejecute, no debe cambiar vistaActiva. Marcamos un flag temporal.
+      const prev = UI_INV.vistaActiva;
+      applyFilters();
+      UI_INV.vistaActiva = prev;
+      refreshChipVista();
+      UI.toast(`Vista aplicada: ${preset.label}`, 'success');
+    }
 
+    search.querySelector('input').addEventListener('input', applyFilters);
+    [selServicio, selFamilia, selEstado, selEmpresaST, selResp, selGar, selTiempo, selPend].forEach(s => s.querySelector('select').addEventListener('change', applyFilters));
+
+    refreshChipVista();
     applyFilters();
     io.observe(sentinel);
   },
 };
+
+/* ============================================================
+   R7 — Popovers de columnas y vistas rápidas del Inventario
+   ============================================================ */
+
+function abrirPopoverColumnas(anchor, onChange) {
+  UI.popover(anchor, { width: 280, render: (body, { close }) => {
+    body.appendChild(h('div', { style:{fontSize:'12px', color:'var(--ink-3)', textTransform:'uppercase', letterSpacing:'.04em', marginBottom:'8px', fontWeight:500} }, 'Mostrar columnas'));
+    const visibles = new Set(invColumnasVisibles());
+    INV_COLUMNAS.forEach(col => {
+      const lbl = h('label', { style:{display:'flex', alignItems:'center', gap:'8px', padding:'4px 0', cursor:'pointer', fontSize:'13px'} }, [
+        h('input', { type:'checkbox', checked: visibles.has(col.key), onchange:(e)=> {
+          if (e.target.checked) visibles.add(col.key);
+          else visibles.delete(col.key);
+          // Mantener el orden del catálogo
+          const ordenado = INV_COLUMNAS.filter(c => visibles.has(c.key)).map(c => c.key);
+          invSetColumnasVisibles(ordenado);
+          // Aplicar el cambio in-place
+          UI_INV.vistaActiva = UI_INV.vistaActiva && UI_INV.vistaActiva !== 'todos' ? 'personalizada' : UI_INV.vistaActiva;
+          onChange?.();
+        } }),
+        h('span', col.label),
+      ]);
+      body.appendChild(lbl);
+    });
+    body.appendChild(h('hr', { style:{margin:'8px 0', border:0, borderTop:'.5px solid var(--line)'} }));
+    body.appendChild(h('button.btn.sm.ghost', { style:{width:'100%', justifyContent:'center'}, onclick: () => {
+      invResetColumnas();
+      onChange?.();
+      close();
+    } }, [ h('i.ti.ti-restore'), 'Restaurar default' ]));
+  } });
+}
+
+function abrirPopoverVistas(anchor, onPick) {
+  UI.popover(anchor, { width: 320, render: (body, { close }) => {
+    body.appendChild(h('div', { style:{fontSize:'12px', color:'var(--ink-3)', textTransform:'uppercase', letterSpacing:'.04em', marginBottom:'8px', fontWeight:500} }, 'Vistas rápidas'));
+    invGetPresets().forEach(preset => {
+      const desactivado = preset.requiereUsuario && !usuarioActual();
+      const item = h('div', {
+        style: Object.assign(
+          { padding:'8px 10px', borderRadius:'6px', cursor: desactivado ? 'not-allowed' : 'pointer', display:'flex', flexDirection:'column', gap:'2px' },
+          desactivado ? { opacity:'.45' } : null,
+        ),
+        title: desactivado ? 'Identificate primero (Configuración → Mi usuario).' : '',
+        onclick: () => {
+          if (desactivado) return;
+          onPick(preset);
+          close();
+        },
+      }, [
+        h('div', { style:{fontSize:'13px', fontWeight:500} }, preset.label),
+        h('div', { style:{fontSize:'11px', color:'var(--ink-3)'} }, preset.desc),
+      ]);
+      item.addEventListener('mouseenter', () => { if (!desactivado) item.style.background = 'var(--paper-2)'; });
+      item.addEventListener('mouseleave', () => { item.style.background = ''; });
+      body.appendChild(item);
+    });
+  } });
+}
 
 function selectField(label, placeholder, items, value='') {
   const wrap = h('div');
@@ -6861,14 +7150,171 @@ function askPeriodoModal(periodoSugerido) {
 const UI_PEND = {
   filtros: { estado: '', asignado: '', desde: '', hasta: '' },
   focusId: null,
-  // Tracks which cards are expanded (Set of ids).
   expanded: new Set(),
+  // R7
+  modo: 'lista',       // 'lista' | 'calendario'
+  calendarioMes: null, // { year, month0 } — null = mes actual
 };
 
 // Snapshot del último filtrado aplicado en Inventario, usado por
 // `exportarInventarioFiltrado`. Volátil (no se persiste).
 let INV_LAST_FILTERED = null;
 let INV_LAST_FILTROS  = null;
+
+/* ============================================================
+   R7 — Catálogo de columnas y vistas rápidas del Inventario
+   ============================================================ */
+
+// Estado UI volátil del Inventario.
+const UI_INV = {
+  columnas: null,    // array de keys visibles (se carga en boot desde localStorage)
+  vistaActiva: null, // id del preset activo o 'personalizada'
+};
+
+/**
+ * Catálogo completo de columnas del Inventario. Cada entrada provee
+ * label, tipo de dato y función `valor(e)` para mostrar/exportar.
+ */
+const INV_COLUMNAS = [
+  { key:'id',           label:'ID',                 tipo:'numero',  valor: e => e.id ?? '' },
+  { key:'servicio',     label:'Servicio',           tipo:'texto',   valor: e => e.servicio || '' },
+  { key:'nombre',       label:'Equipo',             tipo:'texto',   valor: e => e.nombre || '' },
+  { key:'fam',          label:'Familia',            tipo:'texto',   valor: e => e.fam || '' },
+  { key:'carpeta',      label:'Carpeta',            tipo:'numero',  valor: e => e.carpeta ?? '' },
+  { key:'inventario',   label:'N° Inventario',      tipo:'texto',   valor: e => e.inventario || '' },
+  { key:'serie',        label:'Serie',              tipo:'texto',   valor: e => e.serie || '' },
+  { key:'marca',        label:'Marca',              tipo:'texto',   valor: e => e.marca || '' },
+  { key:'modelo',       label:'Modelo',             tipo:'texto',   valor: e => e.modelo || '' },
+  { key:'anio',         label:'Año',                tipo:'numero',  valor: e => e.anio || '' },
+  { key:'frecuencia',   label:'Frecuencia',         tipo:'texto',   valor: e => e.frecuencia || '' },
+  { key:'estado',       label:'Estado',             tipo:'pill',    valor: e => e.estado || '' },
+  { key:'diasEnEstado', label:'Días en estado',     tipo:'numero',  valor: e => { const d = diasEnEstadoActual(e); return d == null ? '' : Math.floor(d); } },
+  { key:'enGarantia',   label:'En garantía',        tipo:'bool',    valor: e => !!e.enGarantia },
+  { key:'responsable',  label:'Responsable mes',    tipo:'texto',   valor: e => responsableDelPeriodo(e) || '' },
+  { key:'ultimaMP',     label:'Última MP',          tipo:'fecha',   valor: e => ultimaMP(e) },
+  { key:'ultimaGestion',label:'Última gestión',     tipo:'fecha',   valor: e => ultimaGestion(e) },
+  { key:'pendientes',   label:'Pendientes abiertos',tipo:'numero',  valor: e => cantidadPendientesAbiertos(e) },
+];
+
+// Columnas visibles por defecto al estrenar la vista.
+const INV_COLUMNAS_DEFAULT = ['inventario','servicio','nombre','fam','marca','modelo','estado','diasEnEstado','responsable'];
+
+function invColumnasVisibles() {
+  if (!UI_INV.columnas) {
+    try {
+      const raw = localStorage.getItem('pmp.v3.ui.inventario.columnas');
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) UI_INV.columnas = arr;
+      }
+    } catch {}
+    if (!UI_INV.columnas) UI_INV.columnas = INV_COLUMNAS_DEFAULT.slice();
+  }
+  const validas = new Set(INV_COLUMNAS.map(c => c.key));
+  return UI_INV.columnas.filter(k => validas.has(k));
+}
+function invSetColumnasVisibles(keys) {
+  UI_INV.columnas = keys.slice();
+  try { localStorage.setItem('pmp.v3.ui.inventario.columnas', JSON.stringify(UI_INV.columnas)); } catch {}
+}
+function invResetColumnas() {
+  UI_INV.columnas = INV_COLUMNAS_DEFAULT.slice();
+  try { localStorage.setItem('pmp.v3.ui.inventario.columnas', JSON.stringify(UI_INV.columnas)); } catch {}
+}
+
+/** Render del valor de una celda según su tipo. Devuelve un Node o string. */
+function invCellRender(col, e) {
+  const v = col.valor(e);
+  switch (col.tipo) {
+    case 'pill': {
+      if (e.esSlot) return h('span.pill.muted', 'Slot');
+      return h(`span.pill.${ESTADO_PILL[v]||''}`.trim(), [ h('span.dot'), ESTADO_LABEL[v] || v ]);
+    }
+    case 'numero': {
+      if (col.key === 'diasEnEstado') {
+        const d = diasEnEstadoActual(e);
+        if (d == null) return '—';
+        return h(`span.pill.${d > 30 ? 'danger' : d > 7 ? 'warning' : 'success'}`, `${Math.floor(d)}d`);
+      }
+      if (col.key === 'pendientes') {
+        const n = v;
+        return n ? h('span.pill.info', String(n)) : '—';
+      }
+      return v == null || v === '' ? '—' : String(v);
+    }
+    case 'fecha': {
+      if (!v) return '—';
+      return h('span.col-mono', fmt.date(v));
+    }
+    case 'bool': {
+      return v ? h('span.pill.purple', 'Sí') : '—';
+    }
+    default:
+      return v || '—';
+  }
+}
+
+/** Valor textual para exportar a Excel (formateo más conservador). */
+function invCellExport(col, e) {
+  const v = col.valor(e);
+  switch (col.tipo) {
+    case 'pill':  return ESTADO_LABEL[v] || v || '';
+    case 'fecha': return v ? fmt.date(v) : '';
+    case 'bool':  return v ? 'Sí' : '';
+    case 'numero':
+      if (col.key === 'diasEnEstado') { const d = diasEnEstadoActual(e); return d == null ? '' : Math.floor(d); }
+      if (v == null || v === '') return '';
+      return Number(v) === v ? v : String(v);
+    default:      return v == null ? '' : String(v);
+  }
+}
+
+/* ============================================================
+   R7 — Vistas rápidas (presets) del Inventario
+   ============================================================ */
+
+/** Devuelve un preset evaluado en el momento (usuario actual, fecha de hoy). */
+function invGetPresets() {
+  const yo = usuarioActual();
+  const hoy = new Date();
+  const seisMesesAtras = new Date(hoy.getTime() - 183 * 86400000).toISOString().slice(0,10);
+  return [
+    { id:'todos',     label:'Todos activos',                  desc:'sin filtros · slots ocultos',
+      params: { servicio:'', familia:'', estado:'', responsable:'', garantia:'', tiempoEstado:'', empresaST:'', pendientes:'', mpDesde:'', mpHasta:'', gestionDesde:'', gestionHasta:'' },
+      columnas: INV_COLUMNAS_DEFAULT.slice() },
+
+    { id:'st_ahora',  label:'En servicio técnico ahora',      desc:'estado = Servicio técnico',
+      params: { estado:'ServicioTecnico' },
+      columnas: ['inventario','servicio','nombre','fam','estado','diasEnEstado','ultimaGestion','responsable'] },
+
+    { id:'recep_pend',label:'Recepcionados pendientes',       desc:'estado = Recepcionado',
+      params: { estado:'Recepcionado' },
+      columnas: ['inventario','servicio','nombre','fam','estado','diasEnEstado','responsable'] },
+
+    { id:'noop',      label:'No operativos en clínica',       desc:'estado = No operativo',
+      params: { estado:'NoOperativo' },
+      columnas: ['inventario','servicio','nombre','fam','estado','diasEnEstado','ultimaGestion','responsable'] },
+
+    { id:'mi_parque', label:'Mi parque a cargo',              desc:'responsable = yo',
+      requiereUsuario: true,
+      params: yo ? { responsable: yo } : {},
+      columnas: INV_COLUMNAS_DEFAULT.slice() },
+
+    { id:'con_pend',  label:'Con pendientes abiertos',        desc:'pendientes = con',
+      params: { pendientes:'con' },
+      columnas: INV_COLUMNAS_DEFAULT.concat(['pendientes']) },
+
+    { id:'sin_mp_6m', label:'Sin MP en >6 meses',             desc:`última MP ≤ ${fmt.date(seisMesesAtras)}`,
+      params: { mpHasta: seisMesesAtras },
+      columnas: ['inventario','servicio','nombre','fam','frecuencia','ultimaMP','responsable'] },
+
+    { id:'reporte',   label:'Para reporte a jefatura',        desc:'no operativos (todos)',
+      params: { estado:'no_operativos_todos' },
+      columnas: ['inventario','servicio','nombre','fam','estado','diasEnEstado','ultimaGestion','responsable'] },
+  ];
+}
+
+
 
 /**
  * Exporta a Excel los equipos actualmente filtrados en Inventario.
@@ -6882,22 +7328,17 @@ async function exportarInventarioFiltrado() {
       const ok = await UI.dialog({ title:'Exportar Inventario', message:`Vas a exportar ${lista.length} equipos. ¿Continuamos?`, confirmText:'Exportar' });
       if (!ok) return;
     }
-    const headers = ['ID','Servicio','Equipo','Familia','Carpeta','N° Inventario','Serie','Marca','Modelo','Año','Frecuencia','Estado','Días en estado','En garantía'];
+    // R7: usar columnas visibles del catálogo, en orden.
+    const colsKeys = invColumnasVisibles();
+    const cols = colsKeys.map(k => INV_COLUMNAS.find(c => c.key === k)).filter(Boolean);
+    const headers = cols.map(c => c.label);
     const data = [headers];
     lista.forEach(e => {
-      const d = diasEnEstadoActual(e);
-      data.push([
-        e.id || '', e.servicio || '', e.nombre || '', e.fam || '',
-        e.carpeta ?? '', e.inventario || '', e.serie || '',
-        e.marca || '', e.modelo || '', e.anio || '',
-        e.frecuencia || '', ESTADO_LABEL[e.estado] || e.estado || '',
-        d == null ? '' : Math.floor(d),
-        e.enGarantia ? 'Sí' : '',
-      ]);
+      data.push(cols.map(c => invCellExport(c, e)));
     });
     const wb = XLSX.utils.book_new();
     const ws = XLSX.utils.aoa_to_sheet(data);
-    ws['!cols'] = headers.map(h => ({ wch: h.length + 6 }));
+    ws['!cols'] = headers.map(h => ({ wch: Math.max(12, h.length + 6) }));
     XLSX.utils.book_append_sheet(wb, ws, 'Equipos');
 
     // Hoja Resumen
@@ -6944,6 +7385,208 @@ function pendFiltrosActivos() {
   return !!(f.estado || f.asignado || f.desde || f.hasta);
 }
 
+/**
+ * R7 — Vista calendario de Pendientes.
+ * Renderiza un grid mensual con los pendientes que vencen cada día.
+ * Hasta 3 por celda + "+ N más" para ver el resto.
+ * Click en pendiente: abre la card expandida en un modal.
+ * Aplica filtros de estado y responsable (no de rango de fechas).
+ */
+function renderCalendarioPendientes(refresh) {
+  const wrap = h('div', { style:{} });
+
+  // Mes visible
+  const now = new Date();
+  if (!UI_PEND.calendarioMes) UI_PEND.calendarioMes = { year: now.getFullYear(), month0: now.getMonth() };
+  const { year, month0 } = UI_PEND.calendarioMes;
+  const fechaMes = new Date(year, month0, 1);
+  const labelMes = fechaMes.toLocaleDateString('es-CL', { month:'long', year:'numeric' });
+
+  // Header del calendario
+  const header = h('div', { style:{display:'flex', alignItems:'center', gap:'8px', marginBottom:'10px'} }, [
+    h('button.btn.icon.ghost', { onclick: () => { const m = new Date(year, month0 - 1, 1); UI_PEND.calendarioMes = { year:m.getFullYear(), month0:m.getMonth() }; refresh(); } }, [ h('i.ti.ti-chevron-left') ]),
+    h('div', { style:{flex:1, textAlign:'center', fontSize:'15px', fontWeight:500, textTransform:'capitalize'} }, labelMes),
+    h('button.btn.icon.ghost', { onclick: () => { const m = new Date(year, month0 + 1, 1); UI_PEND.calendarioMes = { year:m.getFullYear(), month0:m.getMonth() }; refresh(); } }, [ h('i.ti.ti-chevron-right') ]),
+    h('button.btn.sm.ghost', { onclick: () => { UI_PEND.calendarioMes = { year: now.getFullYear(), month0: now.getMonth() }; refresh(); } }, [ h('i.ti.ti-calendar-time'), 'Hoy' ]),
+  ]);
+  wrap.appendChild(header);
+
+  // Filtrar pendientes (sin rango fechas, sí estado y asignado)
+  const f = UI_PEND.filtros;
+  const todosPend = STATE.pendientes.filter(p => {
+    if (f.estado && p.estado !== f.estado) return false;
+    if (f.asignado) {
+      if (f.asignado === '__SIN_ASIGNAR__') { if (p.asignado) return false; }
+      else if (p.asignado !== f.asignado) return false;
+    }
+    return true;
+  });
+  const conVence = todosPend.filter(p => !!p.vence);
+  const sinVence = todosPend.length - conVence.length;
+
+  // Indexar por día del mes visible
+  const porDia = new Map();
+  conVence.forEach(p => {
+    const d = new Date(p.vence);
+    if (isNaN(d)) return;
+    const key = d.toISOString().slice(0,10);
+    if (!porDia.has(key)) porDia.set(key, []);
+    porDia.get(key).push(p);
+  });
+  // Ordenar pendientes de cada día por estado (abiertos primero, cerrado al final)
+  function ordenEstado(p) {
+    if (p.estado === 'Cerrado') return 3;
+    if (p.estado === 'Esperando') return 2;
+    if (p.estado === 'EnCurso') return 1;
+    return 0;
+  }
+  porDia.forEach(arr => arr.sort((a,b) => ordenEstado(a) - ordenEstado(b)));
+
+  // Helpers de color
+  function pillKind(p, esVencido, esPorVencer) {
+    if (p.estado === 'Cerrado') return 'success';
+    if (esVencido) return 'danger';
+    if (esPorVencer) return 'warning';
+    return 'info';
+  }
+
+  // Construir grid: filas 7 cols (Lun..Dom). En es-CL semana empieza lunes.
+  // Día de la semana del primer día del mes (0=domingo en JS).
+  const primerDia = fechaMes.getDay(); // 0..6
+  // En grid Lun..Dom: domingo=6, lunes=0
+  const offset = (primerDia + 6) % 7;
+  const ultimoDia = new Date(year, month0 + 1, 0).getDate();
+  const hoyISO = new Date().toISOString().slice(0,10);
+
+  const grid = h('div', { style:{
+    display:'grid', gridTemplateColumns:'repeat(7, 1fr)', gap:'2px',
+    background:'var(--line)', border:'.5px solid var(--line-2)', borderRadius:'8px', overflow:'hidden',
+  } });
+  ['Lun','Mar','Mié','Jue','Vie','Sáb','Dom'].forEach(d => {
+    grid.appendChild(h('div', { style:{padding:'6px 8px', fontSize:'11px', textTransform:'uppercase', letterSpacing:'.04em', color:'var(--ink-3)', fontWeight:500, background:'var(--paper-2)'} }, d));
+  });
+
+  // Celdas previas (mes anterior)
+  for (let i = 0; i < offset; i++) {
+    const fechaPrev = new Date(year, month0, -offset + i + 1);
+    grid.appendChild(renderCelda(fechaPrev, true));
+  }
+  for (let d = 1; d <= ultimoDia; d++) {
+    grid.appendChild(renderCelda(new Date(year, month0, d), false));
+  }
+  // Rellenar fila final hasta múltiplo de 7
+  const totalCeldas = offset + ultimoDia;
+  const rellenar = (7 - (totalCeldas % 7)) % 7;
+  for (let i = 1; i <= rellenar; i++) {
+    grid.appendChild(renderCelda(new Date(year, month0 + 1, i), true));
+  }
+
+  wrap.appendChild(grid);
+
+  // Footer para sin vence
+  if (sinVence) {
+    const foot = h('div', {
+      style:{marginTop:'10px', padding:'8px 12px', background:'var(--paper-2)', borderRadius:'6px', fontSize:'12px', color:'var(--ink-2)', cursor:'pointer', display:'flex', alignItems:'center', gap:'6px'},
+      onclick: () => { UI_PEND.modo = 'lista'; Router.go('tareas'); },
+    }, [
+      h('i.ti.ti-alert-triangle', { style:{color:'var(--warning)'} }),
+      `${sinVence} pendiente${sinVence>1?'s':''} sin fecha de compromiso — solo visibles en modo Lista`,
+    ]);
+    wrap.appendChild(foot);
+  }
+
+  function renderCelda(fechaCelda, esFueraDeMes) {
+    const iso = fechaCelda.toISOString().slice(0,10);
+    const esHoy = iso === hoyISO;
+    const arr = porDia.get(iso) || [];
+    const celda = h('div', { style:{
+      background:'var(--paper)', minHeight:'92px', padding:'4px 6px', display:'flex', flexDirection:'column', gap:'2px',
+      opacity: esFueraDeMes ? '0.4' : '1', cursor: arr.length ? 'pointer' : 'default',
+    } });
+    const numero = h('div', { style:{display:'flex', alignItems:'center', gap:'4px'} }, [
+      h('span', {
+        style: Object.assign({fontSize:'11.5px', fontWeight: esHoy ? 600 : 500},
+          esHoy ? { color:'var(--paper)', background:'var(--info)', borderRadius:'50%', padding:'2px 6px' } : { color:'var(--ink-3)' }),
+      }, String(fechaCelda.getDate())),
+    ]);
+    celda.appendChild(numero);
+
+    // Pendientes del día (hasta 3)
+    const fechaCeldaMs = new Date(year, fechaCelda.getMonth(), fechaCelda.getDate()).getTime();
+    const hoyMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    arr.slice(0, 3).forEach(p => {
+      const esVencido = fechaCeldaMs < hoyMs && p.estado !== 'Cerrado';
+      const esPorVencer = !esVencido && p.estado !== 'Cerrado' && (fechaCeldaMs - hoyMs) <= 3 * 86400000 && (fechaCeldaMs - hoyMs) >= 0;
+      const k = pillKind(p, esVencido, esPorVencer);
+      const txt = (p.descripcion || '').slice(0, 25) + ((p.descripcion || '').length > 25 ? '…' : '');
+      celda.appendChild(h(`div.pill.${k}`, {
+        style:{fontSize:'10.5px', padding:'2px 5px', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', cursor:'pointer', display:'block'},
+        title: p.descripcion,
+        onclick: (ev) => { ev.stopPropagation(); abrirModalPendienteDetalle(p, refresh); },
+      }, txt));
+    });
+    if (arr.length > 3) {
+      celda.appendChild(h('div', {
+        style:{fontSize:'10.5px', color:'var(--ink-3)', cursor:'pointer', padding:'1px 4px'},
+        onclick: (ev) => { ev.stopPropagation(); abrirModalPendientesDelDia(iso, arr, refresh); },
+      }, `+ ${arr.length - 3} más`));
+    } else if (arr.length) {
+      // Click en cualquier parte de la celda → abrir lista del día
+      celda.addEventListener('click', () => abrirModalPendientesDelDia(iso, arr, refresh));
+    }
+    return celda;
+  }
+
+  return wrap;
+}
+
+/** Modal con la card expandida de un pendiente (reúsa renderPendienteCard del modo lista). */
+function abrirModalPendienteDetalle(p, refresh) {
+  UI.modal({
+    title: 'Pendiente',
+    sub: p.descripcion ? p.descripcion.slice(0, 80) + (p.descripcion.length > 80 ? '…' : '') : '',
+    size: 'md',
+    content: (body, { close }) => {
+      UI_PEND.expanded.add(p.id);
+      body.appendChild(renderPendienteCard(p, () => {
+        // Re-render del card dentro del modal
+        body.innerHTML = '';
+        body.appendChild(renderPendienteCard(p, () => {
+          if (refresh) refresh();
+        }));
+      }));
+    },
+    onClose: () => {
+      UI_PEND.expanded.delete(p.id);
+      if (refresh) refresh();
+    },
+  });
+}
+
+/** Modal con la lista de pendientes que vencen un día. */
+function abrirModalPendientesDelDia(iso, arr, refresh) {
+  const fecha = new Date(iso + 'T12:00:00');
+  UI.modal({
+    title: `Pendientes del ${fmt.date(fecha)}`,
+    sub: `${arr.length} pendiente${arr.length>1?'s':''}`,
+    size: 'lg',
+    content: (body) => {
+      arr.forEach(p => {
+        UI_PEND.expanded.add(p.id);
+        body.appendChild(renderPendienteCard(p, () => {
+          // Re-render todo
+          body.innerHTML = '';
+          arr.forEach(pp => body.appendChild(renderPendienteCard(pp, () => {})));
+        }));
+      });
+    },
+    onClose: () => {
+      arr.forEach(p => UI_PEND.expanded.delete(p.id));
+      if (refresh) refresh();
+    },
+  });
+}
+
 VIEWS.tareas = {
   title: 'Pendientes',
   render(root) {
@@ -6964,6 +7607,18 @@ VIEWS.tareas = {
       }));
       return;
     }
+
+    // === Toggle Lista / Calendario ===
+    function modoBtn(modoVal, label, icono) {
+      const isActivo = UI_PEND.modo === modoVal;
+      return h(`button.btn.sm ${isActivo?'primary':'ghost'}`.trim(), {
+        onclick: () => { UI_PEND.modo = modoVal; Router.go('tareas'); },
+      }, [ h('i.ti', { class: 'ti ' + icono }), label ]);
+    }
+    root.appendChild(h('div', { style:{display:'flex', gap:'4px', marginBottom:'12px'} }, [
+      modoBtn('lista','Lista','ti-list'),
+      modoBtn('calendario','Calendario','ti-calendar-event'),
+    ]));
 
     // === Filtros (estado · responsable · rango de fechas de compromiso) ===
     const filtBar = h('div', { style:{display:'flex', gap:'8px', alignItems:'center', flexWrap:'wrap', marginBottom:'12px'} });
@@ -7050,11 +7705,19 @@ VIEWS.tareas = {
     }
 
     function refresh() {
-      // Actualizar visibilidad de botones de limpiar según filtros activos.
-      btnLimpiarFechas.style.display = (UI_PEND.filtros.desde || UI_PEND.filtros.hasta) ? '' : 'none';
+      // R7: en modo calendario, el rango de fechas no aplica — se oculta.
+      const modoCal = UI_PEND.modo === 'calendario';
+      fechasGroup.style.display = modoCal ? 'none' : '';
+      btnLimpiarFechas.style.display = (!modoCal && (UI_PEND.filtros.desde || UI_PEND.filtros.hasta)) ? '' : 'none';
       btnLimpiarTodo.style.display = pendFiltrosActivos() ? '' : 'none';
 
       listaWrap.innerHTML = '';
+
+      if (modoCal) {
+        listaWrap.appendChild(renderCalendarioPendientes(refresh));
+        return;
+      }
+
       const filtrados = aplicarFiltros(STATE.pendientes);
       if (!filtrados.length) {
         listaWrap.appendChild(emptyState({
@@ -8309,6 +8972,12 @@ try {
     abrirModalSolicitudTrabajo, abrirModalEnvioST, abrirModalRecepcion, abrirModalReparacion,
     renderCicloEventos, usuarioActual, setUsuarioActual, revisarEquiposVencidos,
     actualizarBadgesPendientes, exportarInventarioFiltrado,
+    // R7
+    UI_INV, INV_COLUMNAS, INV_COLUMNAS_DEFAULT,
+    invColumnasVisibles, invSetColumnasVisibles, invResetColumnas,
+    invGetPresets, ultimaMP, ultimaGestion, cantidadPendientesAbiertos, empresasSTUsadas,
+    renderCalendarioPendientes, abrirModalPendienteDetalle, abrirModalPendientesDelDia,
+    abrirPopoverColumnas, abrirPopoverVistas,
   };
 } catch {}
 </script>
