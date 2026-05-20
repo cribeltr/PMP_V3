@@ -340,8 +340,20 @@ hr { border: 0; border-top: .5px solid var(--line); margin: 0; }
 }
 .input:focus, .select:focus, .textarea:focus {
   border-color: var(--ink-3);
-  box-shadow: 0 0 0 3px rgba(31,29,24,.06);
+  box-shadow: 0 0 0 3px rgba(94,168,232,.18);
 }
+/* Foco visible para navegación por teclado en cualquier elemento focusable */
+:focus-visible {
+  outline: 2px solid var(--info);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.btn:focus-visible, .nav-item:focus-visible, .cmdk-item:focus-visible, .tab:focus-visible,
+.kpi:focus-visible, .step:focus-visible {
+  outline: 2px solid var(--info);
+  outline-offset: 2px;
+}
+.input:focus-visible, .select:focus-visible, .textarea:focus-visible { outline: none; }
 .textarea { resize: vertical; min-height: 60px; line-height: 1.45; }
 .select { appearance: none; padding-right: 28px;
   background-image: url(var(--select-arrow));
@@ -1223,6 +1235,8 @@ const STATE = {
   contactos: {},
   session: {},
   meta: {},
+  tecnicosOficiales: [],   // lista gestionada por el usuario (no proviene del maestro)
+  diffIgnorados: {},       // { 'uuid:tipo:valor': true } — diferencias dejadas pasar en imports previos
   view: 'dash',
   viewParams: {},
 };
@@ -1241,20 +1255,24 @@ const bus = {
 };
 
 function loadState() {
-  STATE.equipos      = STORAGE.read('equipos', []) || [];
-  STATE.pendientes   = STORAGE.read('pendientes', []) || [];
-  STATE.asignaciones = STORAGE.read('asignaciones', {}) || {};
-  STATE.contactos    = STORAGE.read('contactos', {}) || {};
-  STATE.session      = STORAGE.read('session', {}) || {};
-  STATE.meta         = STORAGE.read('meta', { schemaVersion: SCHEMA_VERSION, appVersion: APP_VERSION }) || {};
+  STATE.equipos           = STORAGE.read('equipos', []) || [];
+  STATE.pendientes        = STORAGE.read('pendientes', []) || [];
+  STATE.asignaciones      = STORAGE.read('asignaciones', {}) || {};
+  STATE.contactos         = STORAGE.read('contactos', {}) || {};
+  STATE.session           = STORAGE.read('session', {}) || {};
+  STATE.meta              = STORAGE.read('meta', { schemaVersion: SCHEMA_VERSION, appVersion: APP_VERSION }) || {};
+  STATE.tecnicosOficiales = STORAGE.read('tecnicosOficiales', []) || [];
+  STATE.diffIgnorados     = STORAGE.read('diffIgnorados', {}) || {};
 }
 
 function persist(slice) {
-  if (!slice || slice === 'equipos')      STORAGE.write('equipos',      STATE.equipos);
-  if (!slice || slice === 'pendientes')   STORAGE.write('pendientes',   STATE.pendientes);
-  if (!slice || slice === 'asignaciones') STORAGE.write('asignaciones', STATE.asignaciones);
-  if (!slice || slice === 'contactos')    STORAGE.write('contactos',    STATE.contactos);
-  if (!slice || slice === 'session')      STORAGE.write('session',      STATE.session);
+  if (!slice || slice === 'equipos')           STORAGE.write('equipos',           STATE.equipos);
+  if (!slice || slice === 'pendientes')        STORAGE.write('pendientes',        STATE.pendientes);
+  if (!slice || slice === 'asignaciones')      STORAGE.write('asignaciones',      STATE.asignaciones);
+  if (!slice || slice === 'contactos')         STORAGE.write('contactos',         STATE.contactos);
+  if (!slice || slice === 'session')           STORAGE.write('session',           STATE.session);
+  if (!slice || slice === 'tecnicosOficiales') STORAGE.write('tecnicosOficiales', STATE.tecnicosOficiales);
+  if (!slice || slice === 'diffIgnorados')     STORAGE.write('diffIgnorados',     STATE.diffIgnorados);
   bus.emit('state:change', slice);
 }
 
@@ -1270,16 +1288,38 @@ const EQ = {
   familias() {
     return Array.from(new Set(STATE.equipos.map(e => e.fam).filter(Boolean))).sort((a,b)=>a.localeCompare(b,'es'));
   },
+  /** Universo de técnicos: oficiales del SEC + todas las asignaciones cargadas + ejecutores históricos. */
   responsables() {
-    return Array.from(new Set(STATE.equipos.map(e => e.responsableMaster).filter(Boolean))).sort((a,b)=>a.localeCompare(b,'es'));
+    const set = new Set();
+    (STATE.tecnicosOficiales || []).forEach(n => { if (n) set.add(n); });
+    Object.values(STATE.asignaciones || {}).forEach(per => {
+      if (!per || typeof per !== 'object') return;
+      Object.entries(per).forEach(([k, v]) => { if (k !== '__meta' && v && typeof v === 'string') set.add(v); });
+    });
+    STATE.equipos.forEach(e => (e.historial || []).forEach(h => { if (h.ejecutor) set.add(h.ejecutor); }));
+    return Array.from(set).sort((a,b) => a.localeCompare(b,'es'));
+  },
+  /** Técnicos presentes como responsable en el período (subset de responsables()). */
+  responsablesPeriodo(periodo) {
+    const asign = STATE.asignaciones?.[periodo];
+    if (!asign || !asign.__meta) return [];
+    const set = new Set();
+    Object.entries(asign).forEach(([k, v]) => { if (k !== '__meta' && v) set.add(v); });
+    return Array.from(set).sort((a,b) => a.localeCompare(b,'es'));
   },
   search(q, filters={}) {
     const n = normalize(q);
+    const periodo = filters.periodo || null;
+    const asign   = periodo ? (STATE.asignaciones?.[periodo] || null) : null;
     return STATE.equipos.filter(e => {
       if (filters.servicio && e.servicio !== filters.servicio) return false;
       if (filters.familia  && e.fam !== filters.familia) return false;
       if (filters.estado   && e.estado !== filters.estado) return false;
-      if (filters.responsable && e.responsableMaster !== filters.responsable) return false;
+      if (filters.responsable) {
+        // Match contra asignación mensual; "(sin asignar)" = equipos sin entrada en asign
+        const r = asign ? (asign[e.uuid] || '(sin asignar)') : '(sin asignar)';
+        if (r !== filters.responsable) return false;
+      }
       if (filters.garantia === 'si' && !e.enGarantia) return false;
       if (filters.garantia === 'no' &&  e.enGarantia) return false;
       if (filters.slot === 'si' && !e.esSlot) return false;
@@ -1308,12 +1348,12 @@ const EQ = {
     STATE.equipos.forEach(e => (e.historial || []).forEach(h => { if (h.ejecutor) set.add(h.ejecutor); }));
     return Array.from(set).sort((a,b) => a.localeCompare(b, 'es'));
   },
+  /** Responsables activos en la operación: oficiales + asignaciones + ejecutores + responsables de ciclos abiertos. NO incluye responsableMaster del Excel (referencial). */
   responsablesActivos() {
-    const set = new Set();
-    STATE.equipos.forEach(e => {
-      if (e.responsableMaster) set.add(e.responsableMaster);
-      (e.correctivos||[]).forEach(c => { if (c.apertura?.responsable) set.add(c.apertura.responsable); });
-    });
+    const set = new Set(this.responsables());
+    STATE.equipos.forEach(e => (e.correctivos||[]).forEach(c => {
+      if (c.apertura?.responsable) set.add(c.apertura.responsable);
+    }));
     return Array.from(set).sort((a,b) => a.localeCompare(b, 'es'));
   },
 };
@@ -1598,16 +1638,54 @@ const CICLO = {
       if (data.enGarantia !== undefined) c.enGarantia = !!data.enGarantia;
     }
 
+    const previo = c[eslabon] ? Object.assign({}, c[eslabon]) : null;
     c[eslabon] = Object.assign({}, c[eslabon] || {}, payload);
 
     // Limpiar borrador del eslabón
     if (c.borradores && c.borradores[eslabon]) delete c.borradores[eslabon];
 
-    pushEvento(e, {
-      tipo: 'CICLO-' + eslabon.toUpperCase(),
-      ts: data.fechaEvento,
-      payload: Object.assign({ cicloUuid: c.uuid }, payload),
-    });
+    const esRetroactivo = !advance || c.eslabonActual !== eslabon;
+    const tipoEvento = 'CICLO-' + eslabon.toUpperCase();
+
+    if (esRetroactivo && previo) {
+      // Reescribir timestamps de los eventos asociados (mismo tipo + mismo ciclo).
+      const fechaPrev = previo.fechaEvento;
+      (e.eventos || []).forEach(ev => {
+        if (ev.tipo === tipoEvento && ev.payload && ev.payload.cicloUuid === c.uuid) {
+          // Si el evento referenciaba la fecha previa, actualizamos.
+          if (!fechaPrev || ev.ts === fechaPrev) {
+            ev.ts = data.fechaEvento;
+            ev.payload = Object.assign({}, ev.payload, { fechaEvento: data.fechaEvento, fechaRegistroEdicion: new Date().toISOString() });
+          }
+        }
+      });
+      // Evento marcador de la edición.
+      pushEvento(e, {
+        tipo: 'EDICION_RETROACTIVA',
+        ts: new Date().toISOString(),     // este es administrativo: now() está permitido
+        payload: { cicloUuid: c.uuid, eslabon, fechaPrev, fechaNueva: data.fechaEvento },
+      });
+      // Recalcular estadoDesde desde el evento más reciente que cambia el estado.
+      const cambiosEstado = (e.eventos || []).filter(ev => {
+        const t = ev.tipo;
+        if (t === 'EDICION_RETROACTIVA') return false;
+        if (ev.payload?.cicloUuid === c.uuid && ['CICLO-APERTURA','CICLO-ENVIO','CICLO-CIERRE','CICLO-LOOP'].includes(t)) return true;
+        if (t === 'MP' && ['SI','FS','BAJA'].includes(ev.payload?.resultado)) return true;
+        if (t === 'APERTURA-CICLO' || t === 'CAUSAL-PENDIENTE-CLINICO' || t === 'CAUSAL-VINCULADA') return true;
+        return false;
+      });
+      if (cambiosEstado.length) {
+        cambiosEstado.sort((a,b) => new Date(b.ts) - new Date(a.ts));
+        e.estadoDesde = cambiosEstado[0].ts;
+      }
+    } else {
+      // Avance normal: registramos el evento del eslabón.
+      pushEvento(e, {
+        tipo: tipoEvento,
+        ts: data.fechaEvento,
+        payload: Object.assign({ cicloUuid: c.uuid }, payload),
+      });
+    }
 
     let nextEslabon = null;
     let closed = false;
@@ -2171,6 +2249,9 @@ async function importMaestroFile(file) {
   persist('equipos');
   persist('session');
 
+  // Filtrar diferencias previamente ignoradas (decisiones persistidas)
+  aplicarIgnoradosAlDiff(diff);
+
   // Totales del diff
   diff.totales = {
     nuevos:   diff.nuevos.length,
@@ -2178,20 +2259,67 @@ async function importMaestroFile(file) {
     cambios:  diff.cambios.length,
     camposCambiados: diff.cambios.reduce((s,c) => s + c.fields.length, 0),
     grillaCambios:   diff.cambios.reduce((s,c) => s + c.grilla.length, 0),
+    ignoradosPrevios: diff.ignoradosPrevios || 0,
   };
   result.diff = diff;
   return result;
 }
 
+// Campos seguidos en el diff. NO incluye responsableMaster: la fuente de
+// verdad del responsable es la asignación mensual, no el maestro.
 const DIFF_CAMPOS = ['servicio','unidad','ubicacion','procedencia','marca','modelo','anio','vidaUtil',
-                     'clasificacion','enu','observacion','frecuencia','responsableMaster','fam','famOriginal','carpeta','nombre','id'];
+                     'clasificacion','enu','observacion','frecuencia','fam','famOriginal','carpeta','nombre','id'];
 const DIFF_CAMPOS_LABEL = {
   servicio:'Servicio', unidad:'Unidad', ubicacion:'Ubicación', procedencia:'Procedencia',
   marca:'Marca', modelo:'Modelo', anio:'Año', vidaUtil:'Vida útil', clasificacion:'Clasificación',
   enu:'ENU / baja', observacion:'Observación', frecuencia:'Frecuencia MP',
-  responsableMaster:'Responsable maestro', fam:'Familia', famOriginal:'Familia (original)',
+  fam:'Familia', famOriginal:'Familia (original)',
   carpeta:'Carpeta', nombre:'Nombre', id:'ID',
 };
+
+/* ============================================================
+   DIFF · ignorados persistentes (item-por-item)
+   ============================================================ */
+function diffKeyNuevo(uuidEquipo)              { return `${uuidEquipo}::nuevo`; }
+function diffKeyAusente(uuidEquipo)            { return `${uuidEquipo}::ausente`; }
+function diffKeyCampo(uuidEquipo, campo, val)  { return `${uuidEquipo}::campo::${campo}::${val ?? ''}`; }
+function diffKeyGrilla(uuidEquipo, mes, val)   { return `${uuidEquipo}::grilla::${mes}::${val ?? '∅'}`; }
+
+function esDiffIgnorado(key) { return !!STATE.diffIgnorados[key]; }
+
+function marcarDiffIgnorado(key, contexto) {
+  STATE.diffIgnorados[key] = { ts: new Date().toISOString(), contexto: contexto || null };
+  persist('diffIgnorados');
+}
+
+function aplicarIgnoradosAlDiff(diff) {
+  let ignoradosCount = 0;
+  diff.nuevos = diff.nuevos.filter(n => {
+    const ig = esDiffIgnorado(diffKeyNuevo(n.uuid));
+    if (ig) ignoradosCount++;
+    return !ig;
+  });
+  diff.ausentes = diff.ausentes.filter(a => {
+    const ig = esDiffIgnorado(diffKeyAusente(a.uuid));
+    if (ig) ignoradosCount++;
+    return !ig;
+  });
+  diff.cambios = diff.cambios.map(c => {
+    const fields = c.fields.filter(f => {
+      const ig = esDiffIgnorado(diffKeyCampo(c.uuid, f.campo, f.despues));
+      if (ig) ignoradosCount++;
+      return !ig;
+    });
+    const grilla = c.grilla.filter(g => {
+      const ig = esDiffIgnorado(diffKeyGrilla(c.uuid, g.mes, g.despues));
+      if (ig) ignoradosCount++;
+      return !ig;
+    });
+    return { ...c, fields, grilla };
+  }).filter(c => c.fields.length || c.grilla.length);
+  diff.ignoradosPrevios = ignoradosCount;
+  return diff;
+}
 
 function snapshotEquipoCampos(e) {
   const snap = {};
@@ -2359,7 +2487,16 @@ async function exportPlantillaAsignacion(periodo) {
   await ensureJSZip();
   const equipos = STATE.equipos.filter(e => !e.esSlot && e.estado !== 'DeBaja');
   const tecnicos = sugerirTecnicos();
-  const existing = STATE.asignaciones[periodo] || {};
+  // Pre-llenado: asignación del período actual; si no hay, busca la última asignación del equipo en cualquier período previo.
+  const periodos = listaPeriodos();
+  function ultimoResponsable(equipoUuid) {
+    if ((STATE.asignaciones[periodo] || {})[equipoUuid]) return STATE.asignaciones[periodo][equipoUuid];
+    for (const p of periodos) {
+      const v = (STATE.asignaciones[p] || {})[equipoUuid];
+      if (v) return v;
+    }
+    return '';
+  }
 
   const headers = ['Carpeta','N° Inventario','N° Serie','Equipo','Servicio','Familia','Frecuencia MP','Responsable'];
   const data = [headers];
@@ -2372,7 +2509,7 @@ async function exportPlantillaAsignacion(periodo) {
       e.servicio || '',
       e.fam || '',
       e.frecuencia || '',
-      existing[e.uuid] || '',
+      ultimoResponsable(e.uuid),
     ]);
   });
 
@@ -2385,10 +2522,19 @@ async function exportPlantillaAsignacion(periodo) {
   const wsT = XLSX.utils.aoa_to_sheet(tecData);
   XLSX.utils.book_append_sheet(wb, wsT, 'Tecnicos');
 
+  // Marcar la hoja "Tecnicos" como oculta via Workbook.Sheets (SheetJS escribe state="hidden" correctamente).
+  wb.Workbook = wb.Workbook || {};
+  wb.Workbook.Sheets = wb.Workbook.Sheets || [];
+  const idxAsign = wb.SheetNames.indexOf('Asignacion');
+  const idxTec   = wb.SheetNames.indexOf('Tecnicos');
+  wb.Workbook.Sheets[idxAsign] = Object.assign(wb.Workbook.Sheets[idxAsign] || {}, { Hidden: 0 });
+  wb.Workbook.Sheets[idxTec]   = Object.assign(wb.Workbook.Sheets[idxTec]   || {}, { Hidden: 1 });
+
   // Build initial xlsx
   const ab = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
 
-  // Inject data validation via JSZip
+  // Inyectar dataValidation: debe ir DESPUÉS de <sheetData> y ANTES de <pageMargins> según ECMA-376.
+  // Si lo insertamos justo antes de </worksheet> Excel marca el archivo como dañado.
   const zip = await JSZip.loadAsync(ab);
   const sheetPath = 'xl/worksheets/sheet1.xml';
   let xml = await zip.file(sheetPath).async('string');
@@ -2401,14 +2547,15 @@ async function exportPlantillaAsignacion(periodo) {
     `sqref="H2:H${lastRow}">` +
     `<formula1>Tecnicos!$A$2:$A$${tecLast}</formula1>` +
     `</dataValidation></dataValidations>`;
-  // Insert before </worksheet>
-  xml = xml.replace('</worksheet>', `${validation}</worksheet>`);
+  // Anclas válidas para insertar (en orden de preferencia, todas posteriores a dataValidations en el schema).
+  const anchors = ['<pageMargins', '<pageSetup', '<headerFooter', '<rowBreaks', '<colBreaks', '<drawing', '<legacyDrawing', '<tableParts', '</worksheet>'];
+  let inserted = false;
+  for (const a of anchors) {
+    const idx = xml.indexOf(a);
+    if (idx >= 0) { xml = xml.slice(0, idx) + validation + xml.slice(idx); inserted = true; break; }
+  }
+  if (!inserted) throw new Error('No se pudo insertar la validación de datos en el XLSX.');
   zip.file(sheetPath, xml);
-
-  // Hide the technicians sheet
-  let wbXml = await zip.file('xl/workbook.xml').async('string');
-  wbXml = wbXml.replace(/<sheet ([^/]*name="Tecnicos"[^/]*)\/>/, '<sheet $1 state="hidden"/>');
-  zip.file('xl/workbook.xml', wbXml);
 
   const out = await zip.generateAsync({ type: 'blob' });
   const a = document.createElement('a');
@@ -2417,16 +2564,22 @@ async function exportPlantillaAsignacion(periodo) {
   document.body.appendChild(a); a.click(); a.remove();
 }
 
+/**
+ * Universo de técnicos para sugerir en plantillas y formularios.
+ * Fuentes (en este orden): técnicos oficiales SEC + asignaciones mensuales
+ * + responsables de aperturas de ciclo + ejecutores históricos.
+ * IGNORA `responsableMaster` del Excel (es referencial, no fuente de verdad).
+ */
 function sugerirTecnicos() {
   const set = new Set();
-  // Desde asignaciones previas
+  (STATE.tecnicosOficiales || []).forEach(n => { if (n) set.add(n); });
   Object.values(STATE.asignaciones || {}).forEach(per => {
     if (!per || typeof per !== 'object') return;
     Object.entries(per).forEach(([k,v]) => { if (k !== '__meta' && v && typeof v === 'string') set.add(v); });
   });
-  // Desde maestro
-  STATE.equipos.forEach(e => { if (e.responsableMaster) set.add(e.responsableMaster); });
-  // Desde ejecutores históricos
+  STATE.equipos.forEach(e => (e.correctivos||[]).forEach(c => {
+    if (c.apertura?.responsable) set.add(c.apertura.responsable);
+  }));
   EQ.ejecutores().forEach(n => set.add(n));
   return Array.from(set).sort((a,b) => a.localeCompare(b,'es'));
 }
@@ -2475,12 +2628,14 @@ async function exportReporteGeneral() {
   XLSX.utils.book_append_sheet(wb, wsR, 'Resumen');
 
   // === Inventario ===
-  const inv = [['Servicio','Familia','Nombre','Marca','Modelo','Serie','Inventario','Carpeta','Frecuencia','Responsable','Estado','En garantía','Proveedor garantía','Ubicación']];
+  const periodoRep = `${anio}-${String(mes).padStart(2,'0')}`;
+  const respHdr = `Responsable ${MESES[mes-1]} ${anio}`;
+  const inv = [['Servicio','Familia','Nombre','Marca','Modelo','Serie','Inventario','Carpeta','Frecuencia', respHdr, 'Estado','En garantía','Proveedor garantía','Ubicación']];
   STATE.equipos.forEach(e => {
     inv.push([
       e.servicio||'', e.fam||'', e.nombre||'', e.marca||'', e.modelo||'',
       e.serie||'', e.inventario||'', e.carpeta||'', e.frecuencia||'',
-      e.responsableMaster||'', ESTADO_LABEL[e.estado]||e.estado||'',
+      responsableDelPeriodo(e, periodoRep), ESTADO_LABEL[e.estado]||e.estado||'',
       e.enGarantia ? 'Sí' : '', e.garantiaProveedor||'', e.ubicacion||'',
     ]);
   });
@@ -2499,13 +2654,13 @@ async function exportReporteGeneral() {
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(st), 'En ST y NoOp');
 
   // === MP Pendientes del mes ===
-  const pend = [['Servicio','Equipo','Serie','Frecuencia','Programado','Estado equipo','Responsable maestro','Días en estado']];
+  const pend = [['Servicio','Equipo','Serie','Frecuencia','Programado','Estado equipo', respHdr, 'Días en estado']];
   STATE.equipos.forEach(e => {
     const prog = e.grilla?.[mes];
     if (prog !== 'X' && prog !== 'R') return;
     const hayEjec = (e.historial||[]).some(h => h.mes === mes && h.resultado === 'SI');
     if (hayEjec) return;
-    pend.push([e.servicio||'', e.nombre||'', e.serie||'', e.frecuencia||'', prog, ESTADO_LABEL[e.estado]||e.estado, e.responsableMaster||'', fmt.daysSince(e.estadoDesde) ?? '']);
+    pend.push([e.servicio||'', e.nombre||'', e.serie||'', e.frecuencia||'', prog, ESTADO_LABEL[e.estado]||e.estado, responsableDelPeriodo(e, periodoRep), fmt.daysSince(e.estadoDesde) ?? '']);
   });
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pend), `MP pendientes ${MESES[mes-1]}`);
 
@@ -2661,7 +2816,7 @@ function imprimirAnexo1(equipo) {
       ['Vida útil residual', e.vidaUtil || '—'],
       ['Clasificación', e.clasificacion || '—'],
       ['Frecuencia MP', e.frecuencia || '—'],
-      ['Responsable maestro', e.responsableMaster || '—'],
+      ['Responsable del período', responsableDelPeriodo(e) || '—'],
       ['Estado actual', ESTADO_LABEL[e.estado] || e.estado || '—'],
       ['Garantía',   e.enGarantia ? `Vigente${e.garantiaHasta?' hasta '+fmt.date(e.garantiaHasta):''}${e.garantiaProveedor?' · '+e.garantiaProveedor:''}` : '—'],
       ['Observación', e.observacion || '—'],
@@ -2669,7 +2824,7 @@ function imprimirAnexo1(equipo) {
     ${cs}
     ${hs}
     <div class="sign">
-      <div>Ingeniero responsable<br><small>${escapeHtml(e.responsableMaster||'')}</small></div>
+      <div>Ingeniero responsable<br><small>${escapeHtml(responsableDelPeriodo(e) || '')}</small></div>
       <div>Jefe SEC</div>
     </div>
     ${printFooter()}
@@ -2869,23 +3024,37 @@ function periodoActual() {
   return `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
 }
 
+/** Responsable del equipo en un período según el archivo de asignación mensual. '' si no hay archivo o el equipo no aparece. */
+function responsableDelPeriodo(equipo, periodo) {
+  periodo = periodo || periodoActual();
+  const asign = STATE.asignaciones[periodo];
+  if (!asign || !asign.__meta) return '';
+  return asign[equipo.uuid] || '';
+}
+
 function periodoLabel(p) {
   if (!p) return '—';
   const [y, m] = p.split('-');
   return `${MESES[Number(m)-1]} ${y}`;
 }
 
+/**
+ * Agrupa equipos activos por responsable del período.
+ * - Si hay archivo de asignación para el período: usa `asign[e.uuid]`.
+ * - Si NO hay archivo: TODOS los equipos van a "(sin asignar)".
+ *
+ * `responsableMaster` del Excel es referencial y NO se usa como fuente de verdad.
+ * (sin asignar) sólo contiene equipos activos que no aparecen como key en el archivo.
+ */
 function agruparPorTecnico(periodo) {
   const asign = STATE.asignaciones[periodo] || {};
   const tieneArchivo = !!asign.__meta;
   const groups = new Map();
   const equiposActivos = STATE.equipos.filter(e => !e.esSlot && e.estado !== 'DeBaja');
   equiposActivos.forEach(e => {
-    // Si hay archivo cargado para el período, se usa estricto.
-    // Si NO hay archivo, se cae al responsableMaster del maestro Excel.
     const resp = tieneArchivo
       ? (asign[e.uuid] || '(sin asignar)')
-      : (e.responsableMaster || '(sin asignar)');
+      : '(sin asignar)';
     if (!groups.has(resp)) groups.set(resp, []);
     groups.get(resp).push(e);
   });
@@ -2903,56 +3072,128 @@ function abrirModalDiferenciasMaestro(diff, opts={}) {
   const review = !!opts.review;
   const pendienteId = opts.pendienteId || null;
 
+  // Recalcular totales sobre la posible modificación in-place
+  function recomputarTotales() {
+    diff.totales = {
+      nuevos:   diff.nuevos.length,
+      ausentes: diff.ausentes.length,
+      cambios:  diff.cambios.length,
+      camposCambiados: diff.cambios.reduce((s,c) => s + c.fields.length, 0),
+      grillaCambios:   diff.cambios.reduce((s,c) => s + c.grilla.length, 0),
+      ignoradosPrevios: diff.totales?.ignoradosPrevios || 0,
+    };
+  }
+
+  function ignorarTodo() {
+    diff.nuevos.forEach(n   => marcarDiffIgnorado(diffKeyNuevo(n.uuid), { nombre: n.nombre, serie: n.serie }));
+    diff.ausentes.forEach(a => marcarDiffIgnorado(diffKeyAusente(a.uuid), { nombre: a.nombre }));
+    diff.cambios.forEach(c => {
+      c.fields.forEach(f => marcarDiffIgnorado(diffKeyCampo(c.uuid, f.campo, f.despues), { nombre: c.nombre }));
+      c.grilla.forEach(g => marcarDiffIgnorado(diffKeyGrilla(c.uuid, g.mes, g.despues), { nombre: c.nombre }));
+    });
+    diff.nuevos = []; diff.ausentes = []; diff.cambios = [];
+    recomputarTotales();
+  }
+
+  function pendienteTodo() {
+    let n = 0;
+    diff.nuevos.forEach(it   => { crearPendienteItemDiff(diff, it, 'nuevo');   n++; });
+    diff.ausentes.forEach(it => { crearPendienteItemDiff(diff, it, 'ausente'); n++; });
+    diff.cambios.forEach(c => {
+      c.fields.forEach(f => { crearPendienteItemDiff(diff, { ...f, parent:c, uuid:c.uuid }, 'cambio'); n++; });
+      c.grilla.forEach(g => { crearPendienteItemDiff(diff, { ...g, parent:c, uuid:c.uuid }, 'grilla'); n++; });
+    });
+    diff.nuevos = []; diff.ausentes = []; diff.cambios = [];
+    recomputarTotales();
+    return n;
+  }
+
   UI.modal({
     title: review ? 'Diferencias por revisar' : 'Diferencias detectadas en el maestro',
     sub: `${diff.archivo} · ${fmt.datetime(diff.fecha)}`,
     size: 'lg',
     content: (body, { close }) => {
-      const t = diff.totales || { nuevos: diff.nuevos.length, ausentes: diff.ausentes.length, cambios: diff.cambios.length };
+      function render() {
+        body.innerHTML = '';
+        const t = diff.totales;
+        const noHayCambios = !diffTieneCambios(diff);
 
-      // Resumen
-      body.appendChild(h('div.kpi-grid', { style:{marginBottom:'14px'} }, [
-        kpiCard({ label: 'Equipos nuevos',   value: fmt.number(t.nuevos),   kind: t.nuevos ? 'info' : 'muted' }),
-        kpiCard({ label: 'Ausentes',         value: fmt.number(t.ausentes), kind: t.ausentes ? 'warning' : 'muted' }),
-        kpiCard({ label: 'Con cambios',      value: fmt.number(t.cambios),  kind: t.cambios ? 'warning' : 'muted' }),
-        kpiCard({ label: 'Cambios en grilla', value: fmt.number(t.grillaCambios || 0) }),
-      ]));
-
-      if (!diffTieneCambios(diff)) {
-        body.appendChild(h('div.banner.info', [
-          h('i.ti.ti-circle-check'),
-          h('div.grow', 'No se detectaron diferencias respecto del estado actual.'),
+        // Resumen
+        body.appendChild(h('div.kpi-grid', { style:{marginBottom:'14px'} }, [
+          kpiCard({ label: 'Equipos nuevos',    value: fmt.number(t.nuevos),   kind: t.nuevos ? 'info' : 'muted' }),
+          kpiCard({ label: 'Ausentes',          value: fmt.number(t.ausentes), kind: t.ausentes ? 'warning' : 'muted' }),
+          kpiCard({ label: 'Con cambios',       value: fmt.number(t.cambios),  kind: t.cambios ? 'warning' : 'muted' }),
+          kpiCard({ label: 'Cambios en grilla', value: fmt.number(t.grillaCambios || 0) }),
         ]));
-        return;
-      }
 
-      // Tabs
-      const tabs = h('div.tabs', { style:{padding:0, marginBottom:'12px'} });
-      const panel = h('div');
-      const sections = [
-        { id:'nuevos',   label:'Nuevos',   count: t.nuevos,   render: () => panelNuevos(diff) },
-        { id:'ausentes', label:'Ausentes', count: t.ausentes, render: () => panelAusentes(diff) },
-        { id:'cambios',  label:'Datos',    count: diff.cambios.filter(c => c.fields.length).length, render: () => panelCambios(diff) },
-        { id:'grilla',   label:'Grilla',   count: diff.cambios.filter(c => c.grilla.length).length, render: () => panelGrilla(diff) },
-      ];
-      const first = sections.find(s => s.count > 0) || sections[0];
-      sections.forEach(s => {
-        const tab = h('div.tab', [ s.label, h('span.count', s.count) ]);
-        if (s.id === first.id) tab.classList.add('active');
-        tab.addEventListener('click', () => {
-          $$('.tab', tabs).forEach(x => x.classList.remove('active'));
-          tab.classList.add('active');
-          panel.innerHTML = '';
-          panel.appendChild(s.render());
+        if (noHayCambios) {
+          const previos = t.ignoradosPrevios || 0;
+          body.appendChild(h('div.banner.info', [
+            h('i.ti.ti-circle-check'),
+            h('div.grow', previos
+              ? `Sin diferencias relevantes · ${previos} cambios previamente ignorados (podés revisarlos en Configuración).`
+              : 'No se detectaron diferencias respecto del estado actual.'),
+          ]));
+          return;
+        }
+
+        // Banner con ignorados previos si aplica
+        if (t.ignoradosPrevios) {
+          body.appendChild(h('div.banner.info', { style:{marginBottom:'10px'} }, [
+            h('i.ti.ti-info-circle'),
+            h('div.grow', `${t.ignoradosPrevios} diferencias previamente ignoradas no se muestran. Gestioná la lista desde Configuración → Diferencias ignoradas.`),
+          ]));
+        }
+
+        // Acciones globales
+        if (!review) {
+          body.appendChild(h('div', { style:{display:'flex', gap:'8px', flexWrap:'wrap', marginBottom:'12px'} }, [
+            h('button.btn.sm.ghost', { onclick: async () => {
+              const ok = await UI.dialog({ title:'Ignorar todo', message:`¿Marcar como ignoradas ${t.nuevos + t.ausentes + t.camposCambiados + t.grillaCambios} diferencias? No vuelven a aparecer en próximos imports.`, confirmText:'Ignorar todo', variant:'danger' });
+              if (!ok) return;
+              ignorarTodo();
+              UI.toast('Diferencias marcadas como ignoradas.', 'warning');
+              render();
+            } }, [ h('i.ti.ti-eye-off'), 'Marcar todo como ignorado' ]),
+            h('button.btn.sm.ghost', { onclick: async () => {
+              const ok = await UI.dialog({ title:'Crear pendientes', message:`¿Crear un pendiente individual por cada diferencia (${t.nuevos + t.ausentes + t.camposCambiados + t.grillaCambios})?`, confirmText:'Crear todos' });
+              if (!ok) return;
+              const n = pendienteTodo();
+              UI.toast(`${n} pendientes creados.`, 'success');
+              render();
+            } }, [ h('i.ti.ti-clipboard-plus'), 'Marcar todo como pendiente' ]),
+          ]));
+        }
+
+        // Tabs
+        const tabs = h('div.tabs', { style:{padding:0, marginBottom:'12px'} });
+        const panel = h('div');
+        const sections = [
+          { id:'nuevos',   label:'Nuevos',   count: t.nuevos,                                     render: () => panelNuevos(diff, render, review) },
+          { id:'ausentes', label:'Ausentes', count: t.ausentes,                                   render: () => panelAusentes(diff, render, review) },
+          { id:'cambios',  label:'Datos',    count: diff.cambios.filter(c => c.fields.length).length, render: () => panelCambios(diff, render, review) },
+          { id:'grilla',   label:'Grilla',   count: diff.cambios.filter(c => c.grilla.length).length, render: () => panelGrilla(diff, render, review) },
+        ];
+        const first = sections.find(s => s.count > 0) || sections[0];
+        sections.forEach(s => {
+          const tab = h('div.tab', [ s.label, h('span.count', s.count) ]);
+          if (s.id === first.id) tab.classList.add('active');
+          tab.addEventListener('click', () => {
+            $$('.tab', tabs).forEach(x => x.classList.remove('active'));
+            tab.classList.add('active');
+            panel.innerHTML = '';
+            panel.appendChild(s.render());
+          });
+          tabs.appendChild(tab);
         });
-        tabs.appendChild(tab);
-      });
-      body.appendChild(tabs);
-      body.appendChild(panel);
-      panel.appendChild(first.render());
+        body.appendChild(tabs);
+        body.appendChild(panel);
+        panel.appendChild(first.render());
+      }
+      render();
     },
     footer: (f, { close }) => {
-      f.appendChild(h('button.btn.ghost', { onclick: close }, review ? 'Cerrar' : 'Cerrar sin guardar pendiente'));
+      f.appendChild(h('button.btn.ghost', { onclick: close }, review ? 'Cerrar' : 'Cerrar'));
       if (review && pendienteId) {
         f.appendChild(h('button.btn.primary', { onclick: async () => {
           const ok = await UI.dialog({ title:'Cerrar pendiente', message: '¿Marcar este pendiente como revisado y cerrarlo?', confirmText:'Cerrar pendiente' });
@@ -2967,67 +3208,134 @@ function abrirModalDiferenciasMaestro(diff, opts={}) {
           const p = crearPendienteDiferencias(diff);
           UI.toast(`Pendiente creado · vence ${fmt.date(p.vence)}.`, 'success', { duration: 5000 });
           close();
-        }}, [ h('i.ti.ti-clipboard-plus'), 'Crear pendiente para revisar' ]));
+        }}, [ h('i.ti.ti-clipboard-plus'), 'Crear pendiente consolidado' ]));
       }
     },
   });
 }
 
-function panelNuevos(diff) {
+function diffItemActions(opts) {
+  // opts: { onIgnorar, onPendiente, review }
+  if (opts.review) return null; // en modo revisión no se mutan
+  return h('div', { style:{ display:'flex', gap:'4px', justifyContent:'flex-end' } }, [
+    h('button.btn.sm.ghost', {
+      title: 'Marcar como ignorado',
+      onclick: (ev) => { ev.stopPropagation(); opts.onIgnorar(); },
+    }, [ h('i.ti.ti-eye-off') ]),
+    h('button.btn.sm', {
+      title: 'Crear pendiente individual',
+      onclick: (ev) => { ev.stopPropagation(); opts.onPendiente(); },
+    }, [ h('i.ti.ti-clipboard-plus') ]),
+  ]);
+}
+
+function panelNuevos(diff, refresh, review) {
   if (!diff.nuevos.length) return h('div', { style:{padding:'20px', color:'var(--ink-3)', fontSize:'12.5px', textAlign:'center'} }, 'Sin equipos nuevos en este maestro.');
   const tbl = h('table.dt');
-  tbl.innerHTML = `<thead><tr><th>Servicio</th><th>Familia</th><th>Equipo</th><th>Serie</th><th>Inventario</th></tr></thead>`;
+  tbl.innerHTML = `<thead><tr><th>Servicio</th><th>Familia</th><th>Equipo</th><th>Serie</th><th>Inventario</th><th></th></tr></thead>`;
   const tb = h('tbody');
-  diff.nuevos.forEach(r => {
+  diff.nuevos.forEach((r, idx) => {
     tb.appendChild(h('tr', { onclick: () => openFicha(r.uuid) }, [
       h('td.truncate', r.servicio || '—'),
       h('td.truncate', r.fam || '—'),
       h('td', r.nombre || '—'),
       h('td.col-mono', r.serie || '—'),
       h('td.col-mono', r.inventario || '—'),
+      h('td', diffItemActions({
+        review,
+        onIgnorar: () => {
+          marcarDiffIgnorado(diffKeyNuevo(r.uuid), { nombre: r.nombre, serie: r.serie });
+          diff.nuevos.splice(idx, 1);
+          UI.toast('Equipo nuevo marcado como ignorado.', 'warning');
+          refresh();
+        },
+        onPendiente: () => {
+          crearPendienteItemDiff(diff, r, 'nuevo');
+          diff.nuevos.splice(idx, 1);
+          UI.toast('Pendiente creado.', 'success');
+          refresh();
+        },
+      })),
     ]));
   });
   tbl.appendChild(tb);
   return h('div.table-wrap', [ tbl ]);
 }
 
-function panelAusentes(diff) {
+function panelAusentes(diff, refresh, review) {
   if (!diff.ausentes.length) return h('div', { style:{padding:'20px', color:'var(--ink-3)', fontSize:'12.5px', textAlign:'center'} }, 'Todos los equipos del estado actual están presentes en el maestro.');
   const tbl = h('table.dt');
-  tbl.innerHTML = `<thead><tr><th>Servicio</th><th>Equipo</th><th>Serie</th><th>Inventario</th><th>Estado</th></tr></thead>`;
+  tbl.innerHTML = `<thead><tr><th>Servicio</th><th>Equipo</th><th>Serie</th><th>Inventario</th><th>Estado</th><th></th></tr></thead>`;
   const tb = h('tbody');
-  diff.ausentes.forEach(r => {
+  diff.ausentes.forEach((r, idx) => {
     tb.appendChild(h('tr', { onclick: () => openFicha(r.uuid) }, [
       h('td.truncate', r.servicio || '—'),
       h('td', [ r.nombre || '—', r.esSlot ? h('span.pill.muted', { style:{marginLeft:'6px'} }, 'slot') : null ]),
       h('td.col-mono', r.serie || '—'),
       h('td.col-mono', r.inventario || '—'),
       h('td', h(`span.pill.${ESTADO_PILL[r.estado]||''}`.trim(), ESTADO_LABEL[r.estado] || r.estado || '—')),
+      h('td', diffItemActions({
+        review,
+        onIgnorar: () => {
+          marcarDiffIgnorado(diffKeyAusente(r.uuid), { nombre: r.nombre });
+          diff.ausentes.splice(idx, 1);
+          UI.toast('Equipo ausente marcado como ignorado.', 'warning');
+          refresh();
+        },
+        onPendiente: () => {
+          crearPendienteItemDiff(diff, r, 'ausente');
+          diff.ausentes.splice(idx, 1);
+          UI.toast('Pendiente creado.', 'success');
+          refresh();
+        },
+      })),
     ]));
   });
   tbl.appendChild(tb);
   return h('div.table-wrap', [ tbl ]);
 }
 
-function panelCambios(diff) {
+function panelCambios(diff, refresh, review) {
   const conCampos = diff.cambios.filter(c => c.fields.length);
   if (!conCampos.length) return h('div', { style:{padding:'20px', color:'var(--ink-3)', fontSize:'12.5px', textAlign:'center'} }, 'Sin cambios en datos planos.');
   const wrap = h('div');
   conCampos.forEach(c => {
-    const card = h('div.card', { style:{marginBottom:'8px', cursor:'pointer'}, onclick: () => openFicha(c.uuid) }, [
-      h('div', { style:{fontWeight:500, fontSize:'13px', marginBottom:'4px'} }, c.nombre || '(sin nombre)'),
-      h('div', { style:{fontSize:'11.5px', color:'var(--ink-3)', marginBottom:'8px'} }, [
+    const card = h('div.card', { style:{marginBottom:'8px'} });
+    card.appendChild(h('div', { style:{display:'flex', alignItems:'baseline', gap:'8px', marginBottom:'4px', cursor:'pointer'}, onclick: () => openFicha(c.uuid) }, [
+      h('div', { style:{fontWeight:500, fontSize:'13px'} }, c.nombre || '(sin nombre)'),
+      h('div', { style:{fontSize:'11.5px', color:'var(--ink-3)'} }, [
         `${c.servicio || ''}`, c.serie ? ` · S/N ${c.serie}` : '', c.inventario ? ` · Inv ${c.inventario}` : '',
       ].join('')),
-    ]);
+    ]));
     const tbl = h('table.dt');
-    tbl.innerHTML = `<thead><tr><th>Campo</th><th>Antes</th><th>Después</th></tr></thead>`;
+    tbl.innerHTML = `<thead><tr><th>Campo</th><th>Antes</th><th>Después</th><th></th></tr></thead>`;
     const tb = h('tbody');
-    c.fields.forEach(f => {
+    c.fields.forEach((f, fIdx) => {
       tb.appendChild(h('tr', [
         h('td', f.label || f.campo),
         h('td', { style:{color:'var(--ink-3)'} }, f.antes || '—'),
         h('td', { style:{color:'var(--success)'} }, f.despues || '—'),
+        h('td', diffItemActions({
+          review,
+          onIgnorar: () => {
+            marcarDiffIgnorado(diffKeyCampo(c.uuid, f.campo, f.despues), { nombre: c.nombre, campo: f.campo });
+            c.fields.splice(fIdx, 1);
+            if (!c.fields.length && !c.grilla.length) {
+              const ci = diff.cambios.indexOf(c); if (ci >= 0) diff.cambios.splice(ci, 1);
+            }
+            UI.toast(`Cambio "${f.label||f.campo}" ignorado.`, 'warning');
+            refresh();
+          },
+          onPendiente: () => {
+            crearPendienteItemDiff(diff, { ...f, parent: c, uuid: c.uuid }, 'cambio');
+            c.fields.splice(fIdx, 1);
+            if (!c.fields.length && !c.grilla.length) {
+              const ci = diff.cambios.indexOf(c); if (ci >= 0) diff.cambios.splice(ci, 1);
+            }
+            UI.toast('Pendiente creado.', 'success');
+            refresh();
+          },
+        })),
       ]));
     });
     tbl.appendChild(tb);
@@ -3037,24 +3345,52 @@ function panelCambios(diff) {
   return wrap;
 }
 
-function panelGrilla(diff) {
+function panelGrilla(diff, refresh, review) {
   const conGrilla = diff.cambios.filter(c => c.grilla.length);
   if (!conGrilla.length) return h('div', { style:{padding:'20px', color:'var(--ink-3)', fontSize:'12.5px', textAlign:'center'} }, 'Sin cambios en grillas.');
-  const tbl = h('table.dt');
-  tbl.innerHTML = `<thead><tr><th>Equipo</th><th>Serie</th><th>Cambios</th></tr></thead>`;
-  const tb = h('tbody');
+  const wrap = h('div');
   conGrilla.forEach(c => {
-    const cells = h('td', c.grilla.map(g => h('span.pill', { style:{marginRight:'4px', marginBottom:'2px'} },
-      `${MESES[g.mes-1]}: ${g.antes || '∅'} → ${g.despues || '∅'}`
-    )));
-    tb.appendChild(h('tr', { onclick: () => openFicha(c.uuid) }, [
-      h('td', c.nombre || '—'),
-      h('td.col-mono', c.serie || '—'),
-      cells,
+    const card = h('div.card', { style:{marginBottom:'8px'} });
+    card.appendChild(h('div', { style:{display:'flex', alignItems:'baseline', gap:'8px', marginBottom:'8px', cursor:'pointer'}, onclick: () => openFicha(c.uuid) }, [
+      h('div', { style:{fontWeight:500, fontSize:'13px'} }, c.nombre || '(sin nombre)'),
+      h('div', { style:{fontSize:'11.5px', color:'var(--ink-3)'} }, c.serie ? `S/N ${c.serie}` : ''),
     ]));
+    const tbl = h('table.dt');
+    tbl.innerHTML = `<thead><tr><th>Mes</th><th>Antes</th><th>Después</th><th></th></tr></thead>`;
+    const tb = h('tbody');
+    c.grilla.forEach((g, gIdx) => {
+      tb.appendChild(h('tr', [
+        h('td', MESES[g.mes-1]),
+        h('td', { style:{color:'var(--ink-3)'} }, g.antes || '∅'),
+        h('td', { style:{color:'var(--success)'} }, g.despues || '∅'),
+        h('td', diffItemActions({
+          review,
+          onIgnorar: () => {
+            marcarDiffIgnorado(diffKeyGrilla(c.uuid, g.mes, g.despues), { nombre: c.nombre, mes: g.mes });
+            c.grilla.splice(gIdx, 1);
+            if (!c.fields.length && !c.grilla.length) {
+              const ci = diff.cambios.indexOf(c); if (ci >= 0) diff.cambios.splice(ci, 1);
+            }
+            UI.toast(`Cambio de grilla en ${MESES[g.mes-1]} ignorado.`, 'warning');
+            refresh();
+          },
+          onPendiente: () => {
+            crearPendienteItemDiff(diff, { ...g, parent: c, uuid: c.uuid }, 'grilla');
+            c.grilla.splice(gIdx, 1);
+            if (!c.fields.length && !c.grilla.length) {
+              const ci = diff.cambios.indexOf(c); if (ci >= 0) diff.cambios.splice(ci, 1);
+            }
+            UI.toast('Pendiente creado.', 'success');
+            refresh();
+          },
+        })),
+      ]));
+    });
+    tbl.appendChild(tb);
+    card.appendChild(tbl);
+    wrap.appendChild(card);
   });
-  tbl.appendChild(tb);
-  return h('div.table-wrap', [ tbl ]);
+  return wrap;
 }
 
 function crearPendienteDiferencias(diff) {
@@ -3065,14 +3401,43 @@ function crearPendienteDiferencias(diff) {
   if (t.cambios)  partes.push(`${t.cambios} con cambios`);
   const desc = `Revisar diferencias del maestro ${diff.archivo} (${partes.join(' · ') || 'sin cambios significativos'})`;
   const vence = addBusinessDays(new Date(), 2).toISOString();
-  const p = PENDIENTE.crear({
+  return PENDIENTE.crear({
     tipo: 'diferencias-maestro',
     descripcion: desc,
     asignado: '',
     vence,
     meta: { diff },
   });
-  return p;
+}
+
+function crearPendienteItemDiff(diff, item, kind) {
+  let descripcion = '';
+  let equipoUuid = item.uuid || item.parent?.uuid || null;
+  const nombreEq = item.nombre || item.parent?.nombre || '';
+  const serieEq  = item.serie  || item.parent?.serie  || '';
+  switch (kind) {
+    case 'nuevo':
+      descripcion = `Maestro: equipo nuevo "${nombreEq}" (S/N ${serieEq || '—'}, Inv ${item.inventario || '—'}) — confirmar incorporación al PMP.`;
+      break;
+    case 'ausente':
+      descripcion = `Maestro: equipo "${nombreEq}" (S/N ${serieEq || '—'}) ausente en el archivo nuevo — confirmar si corresponde dar de baja o reingresar.`;
+      break;
+    case 'cambio':
+      descripcion = `Maestro: cambio en "${nombreEq}" — ${item.label || item.campo}: "${item.antes || '∅'}" → "${item.despues || '∅'}".`;
+      break;
+    case 'grilla':
+      descripcion = `Maestro: cambio de grilla en "${nombreEq}" — ${MESES[item.mes-1]}: ${item.antes || '∅'} → ${item.despues || '∅'}.`;
+      break;
+  }
+  const vence = addBusinessDays(new Date(), 3).toISOString();
+  return PENDIENTE.crear({
+    tipo: 'diferencia-item',
+    descripcion,
+    equipoUuid,
+    asignado: '',
+    vence,
+    meta: { kind, item, diffArchivo: diff.archivo, diffFecha: diff.fecha },
+  });
 }
 
 /** Merge updates from master file without destroying historial / correctivos / eventos / R-marks. */
@@ -3196,15 +3561,74 @@ function abrirModalRegistrarMP(equipo, opts={}) {
     sub: equipo.nombre,
     size: 'md',
     content: (body, { close }) => {
+      // Panel de contexto (programación, último registro del mes, frecuencia, meses desde última SI).
+      const contextoWrap = h('div', { style:{ marginBottom:'14px' } });
+      body.appendChild(contextoWrap);
+
+      function renderContexto() {
+        const mes = Number(snap.mes) || (new Date().getMonth()+1);
+        const programado = equipo.grilla?.[mes] || null;
+        const histMes = (equipo.historial || []).filter(h => h.mes === mes)
+          .sort((a,b) => new Date(b.fechaEvento||b.fecha||0) - new Date(a.fechaEvento||a.fecha||0));
+        const ultimoSI    = histMes.find(h => h.resultado === 'SI');
+        const ultimaCausal = histMes.find(h => CAUSALES[h.resultado]);
+        const ultimaSIGlobal = (equipo.historial || []).filter(h => h.resultado === 'SI')
+          .sort((a,b) => new Date(b.fechaEvento||b.fecha||0) - new Date(a.fechaEvento||a.fecha||0))[0];
+        const mesesDesdeSI = ultimaSIGlobal
+          ? Math.floor((Date.now() - new Date(ultimaSIGlobal.fechaEvento||ultimaSIGlobal.fecha||0).getTime()) / (1000*60*60*24*30))
+          : null;
+
+        // Anclas semánticas para color
+        const editingThisRecord = editing && ultimoSI && editing.id === ultimoSI.id;
+        const tipo =
+          ultimoSI && !editingThisRecord ? 'warning' :
+          programado === 'X' || programado === 'R' || programado === 'PM' ? 'info' :
+          programado === 'RA' || !programado ? 'muted' : 'muted';
+
+        const items = [];
+        items.push(h('div', { style:{display:'flex', alignItems:'center', gap:'8px', flexWrap:'wrap'} }, [
+          h('strong', { style:{fontSize:'13px'} }, `Contexto de ${MESES[mes-1]}`),
+          programado
+            ? h(`span.pill.${programado==='X'?'info':programado==='R'?'warning':programado==='PM'?'purple':'muted'}`, programado === 'X' ? 'X · programada' : programado === 'R' ? 'R · reprogramada' : programado === 'RA' ? 'RA · legado' : 'PM · puesta en marcha')
+            : h('span.pill.muted', 'sin programar en grilla'),
+          equipo.frecuencia ? h('span.pill', `frec. ${equipo.frecuencia.toLowerCase()}`) : null,
+          mesesDesdeSI != null
+            ? h(`span.pill${mesesDesdeSI > 12 ? '.warning' : ''}`, `${mesesDesdeSI === 0 ? 'última MP exitosa este mes' : 'última MP exitosa hace ' + mesesDesdeSI + ' mes' + (mesesDesdeSI === 1 ? '' : 'es')}`)
+            : h('span.pill.muted', 'sin MP exitosa registrada'),
+        ]));
+
+        if (ultimoSI && !editingThisRecord) {
+          items.push(h('div', { style:{ marginTop:'6px', fontSize:'12px', color:'var(--ink-2)' } }, [
+            h('i.ti.ti-alert-triangle', { style:{color:'var(--warning)', marginRight:'4px'} }),
+            `Ya hay un registro SI en ${MESES[mes-1]} (${fmt.date(ultimoSI.fechaEvento || ultimoSI.fecha)}${ultimoSI.ejecutor ? ' · '+ultimoSI.ejecutor : ''}). Si vas a corregirlo, abrí el registro desde la pestaña Historial.`,
+          ]));
+        }
+        if (ultimaCausal) {
+          items.push(h('div', { style:{ marginTop:'4px', fontSize:'12px', color:'var(--ink-2)' } }, [
+            h('i.ti.ti-flag', { style:{color:'var(--info)', marginRight:'4px'} }),
+            `Causal previa en ${MESES[mes-1]}: ${ultimaCausal.resultado} (${fmt.date(ultimaCausal.fechaEvento || ultimaCausal.fecha)})${ultimaCausal.ejecutor ? ' · '+ultimaCausal.ejecutor : ''}.`,
+          ]));
+        }
+        if (!programado && !ultimoSI && !ultimaCausal) {
+          items.push(h('div', { style:{ marginTop:'4px', fontSize:'12px', color:'var(--ink-3)' } }, [
+            h('i.ti.ti-info-circle', { style:{marginRight:'4px'} }),
+            `No había nada programado en ${MESES[mes-1]} para este equipo. Verificá el mes computable antes de guardar.`,
+          ]));
+        }
+
+        contextoWrap.innerHTML = '';
+        contextoWrap.appendChild(h(`div.banner.${tipo}`, { style:{ alignItems:'flex-start', flexDirection:'column', gap:'4px' } }, items));
+      }
+
       const fFecha = field('Fecha real del evento', dateCtl(snap.fechaEvento, {
         onchange: (e) => {
           snap.fechaEvento = e.target.value;
           const m = monthOfISO(isoFromDateInput(snap.fechaEvento));
-          if (m) { snap.mes = m; selMes.value = String(m); }
+          if (m) { snap.mes = m; selMes.value = String(m); renderContexto(); }
         },
       }), 'La fecha en terreno. Admite registro retroactivo.');
       const selMes = selectCtl(MESES.map((n,i)=>({value:String(i+1),label:n})), String(snap.mes), {
-        onchange:(e)=> snap.mes = Number(e.target.value),
+        onchange:(e)=> { snap.mes = Number(e.target.value); renderContexto(); },
       });
       const fMes = field('Mes computable', selMes, 'Se autodetecta de la fecha; podés sobrescribirlo si el registro corresponde a otro mes.');
 
@@ -3272,6 +3696,7 @@ function abrirModalRegistrarMP(equipo, opts={}) {
       body.appendChild(row('1fr', [fEj]));
       body.appendChild(row('1fr', [fObs]));
       body.appendChild(motivoWrap);
+      renderContexto();
     },
     footer: (f, { close }) => {
       f.appendChild(h('button.btn.ghost', { onclick: close }, 'Cancelar'));
@@ -4266,7 +4691,7 @@ VIEWS.dash = {
 
     // KPI grid
     const kpis = h('div.kpi-grid');
-    kpis.appendChild(kpiCard({ label: 'Equipos totales', value: fmt.number(total),    onclick: () => Router.go('inv') }));
+    kpis.appendChild(kpiCard({ label: 'Equipos totales', value: fmt.number(total),    onclick: () => Router.go('inv', { showSlots: true }) }));
     kpis.appendChild(kpiCard({ label: 'Operativos',      value: fmt.number(byEst.Operativo),   kind: 'success', onclick: () => Router.go('inv', { estado: 'Operativo' }) }));
     kpis.appendChild(kpiCard({ label: 'No operativos',   value: fmt.number(byEst.NoOperativo), kind: 'danger',  onclick: () => Router.go('inv', { estado: 'NoOperativo' }) }));
     kpis.appendChild(kpiCard({ label: 'En servicio técn.', value: fmt.number(byEst.ServicioTecnico), kind: 'warning', onclick: () => Router.go('inv', { estado: 'ServicioTecnico' }) }));
@@ -4376,13 +4801,21 @@ function emptyState({ icon, title, desc, actions=[] }) {
 VIEWS.inv = {
   title: 'Inventario',
   render(root, params) {
+    // Preferencia persistente para mostrar slots; viewParams.showSlots la sobreescribe (click en KPI del dashboard).
+    const showSlotsPref = (() => {
+      try { return localStorage.getItem('pmp.v3.ui.inventario.showSlots') === '1'; } catch { return false; }
+    })();
+    const showSlots = (params && typeof params.showSlots === 'boolean') ? params.showSlots : showSlotsPref;
+
+    const periodoFiltro = params?.periodo || periodoActual();
+
     const filters = Object.assign({
-      q: '', servicio: '', familia: '', estado: '', responsable: '', garantia: '', slot: 'no',
+      q: '', servicio: '', familia: '', estado: '', responsable: '', garantia: '',
     }, params || {});
 
     const headerEl = viewHeader({
       title: 'Inventario',
-      desc: `${fmt.number(STATE.equipos.length)} equipos cargados`,
+      desc: `${fmt.number(STATE.equipos.length)} equipos cargados${showSlots ? '' : ' · slots disponibles ocultos'}`,
       actions: [
         { label: 'Importar maestro', icon: 'ti-refresh', onclick: handleImportMaestro },
         { label: 'Backup', icon: 'ti-database-export', onclick: exportBackup },
@@ -4410,16 +4843,49 @@ VIEWS.inv = {
       h('i.ti.ti-search'),
       h('input', { type:'text', placeholder:'Buscar por nombre, serie, inventario, marca…', value: filters.q }),
     ]);
+
+    // Responsable: opciones del período activo (asignaciones cargadas) + "(sin asignar)"
+    const respPeriodo = EQ.responsablesPeriodo(periodoFiltro);
+    const respOpts = [
+      ...respPeriodo,
+      '(sin asignar)',
+    ];
+
     const selServicio = selectField('Servicio', '', EQ.servicios(), filters.servicio);
     const selFamilia  = selectField('Familia',  '', EQ.familias(),  filters.familia);
     const selEstado   = selectField('Estado',   '', ESTADOS.map(s => ({ value: s, label: ESTADO_LABEL[s] })), filters.estado);
-    const selResp     = selectField('Responsable', '', EQ.responsables(), filters.responsable);
+    const selResp     = selectField(`Resp. ${periodoLabel(periodoFiltro)}`, '', respOpts, filters.responsable);
     const selGar      = selectField('Garantía', '', [{value:'si',label:'En garantía'},{value:'no',label:'Sin garantía'}], filters.garantia);
-    const selSlot     = selectField('Slots', '', [{value:'no',label:'Ocultar slots'},{value:'si',label:'Sólo slots'}], filters.slot);
+
+    // Toggle slots: visible siempre, default OFF, persistido
+    const slotToggle = h('label', {
+      style:{ display:'flex', alignItems:'center', gap:'6px', padding:'6px 10px', border:'.5px solid var(--line-2)', borderRadius:'var(--r-md)', cursor:'pointer', fontSize:'12px', whiteSpace:'nowrap' },
+      title: 'Slots disponibles son posiciones sin equipo asignado',
+    }, [
+      h('input', { type:'checkbox', checked: showSlots, style:{margin:0}, onchange: (e) => {
+        const v = e.target.checked;
+        try { localStorage.setItem('pmp.v3.ui.inventario.showSlots', v ? '1' : '0'); } catch {}
+        // Pasamos el override por params para que persista en este viewParams stack
+        Router.go('inv', Object.assign({}, currentParams(), { showSlots: v }));
+      }}),
+      h('span', 'Mostrar slots'),
+    ]);
+
+    function currentParams() {
+      return {
+        q: search.querySelector('input').value,
+        servicio: selServicio.querySelector('select').value,
+        familia:  selFamilia.querySelector('select').value,
+        estado:   selEstado.querySelector('select').value,
+        responsable: selResp.querySelector('select').value,
+        garantia: selGar.querySelector('select').value,
+        periodo: periodoFiltro,
+      };
+    }
 
     const toolbar = h('div.table-toolbar', [
       search,
-      h('div.right', [ selServicio, selFamilia, selEstado, selResp, selGar, selSlot,
+      h('div.right', { style:{gap:'6px'} }, [ selServicio, selFamilia, selEstado, selResp, selGar, slotToggle,
         h('button.btn.ghost.sm', { onclick: () => Router.go('inv', {}) }, [ h('i.ti.ti-x'), 'Limpiar' ]),
       ]),
     ]);
@@ -4451,20 +4917,14 @@ VIEWS.inv = {
     let current = [];
 
     function applyFilters() {
-      const f = {
-        servicio: selServicio.querySelector('select').value,
-        familia:  selFamilia.querySelector('select').value,
-        estado:   selEstado.querySelector('select').value,
-        responsable: selResp.querySelector('select').value,
-        garantia: selGar.querySelector('select').value,
-        slot:     selSlot.querySelector('select').value,
-      };
-      const q = search.querySelector('input').value;
+      const f = Object.assign({}, currentParams(), { slot: showSlots ? '' : 'no' });
+      const q = f.q;
       current = EQ.search(q, f);
       current.sort((a,b) => (a.servicio||'').localeCompare(b.servicio||'','es') || (a.nombre||'').localeCompare(b.nombre||'','es'));
       tb.innerHTML = '';
       rendered = 0;
-      meta.textContent = `${fmt.number(current.length)} equipos coinciden con los filtros`;
+      const extra = showSlots ? '' : ` · ${fmt.number(STATE.equipos.filter(e => e.esSlot).length)} slots ocultos`;
+      meta.textContent = `${fmt.number(current.length)} equipos coinciden con los filtros${extra}`;
       renderMore();
     }
     function renderMore() {
@@ -4479,7 +4939,7 @@ VIEWS.inv = {
     const io = new IntersectionObserver(entries => entries.forEach(en => { if (en.isIntersecting && rendered < current.length) renderMore(); }), { rootMargin: '120px' });
 
     search.querySelector('input').addEventListener('input', applyFilters);
-    [selServicio, selFamilia, selEstado, selResp, selGar, selSlot].forEach(s => s.querySelector('select').addEventListener('change', applyFilters));
+    [selServicio, selFamilia, selEstado, selResp, selGar].forEach(s => s.querySelector('select').addEventListener('change', applyFilters));
 
     applyFilters();
     io.observe(sentinel);
@@ -4693,7 +5153,8 @@ function renderFichaTab(id, e) {
         ['Vida útil residual', e.vidaUtil || '—'],
         ['Clasificación', e.clasificacion || '—'],
         ['Frecuencia MP', e.frecuencia || '—'],
-        ['Responsable (maestro)', e.responsableMaster || '—'],
+        ['Responsable del período', responsableDelPeriodo(e) || '—'],
+        ['Responsable (maestro, referencial)', e.responsableMaster || '—'],
         ['ENU / baja', e.enu || '—'],
         ['Estado actual', ESTADO_LABEL[e.estado] || e.estado || '—'],
         ['Estado desde', e.estadoDesde ? `${fmt.date(e.estadoDesde)} (${fmt.rel(e.estadoDesde)})` : '—'],
@@ -5626,16 +6087,19 @@ async function exportMPPendientes() {
   await ensureXLSX();
   const now = new Date();
   const mes = now.getMonth()+1;
-  const data = [['Servicio','Equipo','Serie','Frecuencia','Programado','Estado equipo','Responsable maestro','Días en estado']];
+  const anio = now.getFullYear();
+  const periodo = `${anio}-${String(mes).padStart(2,'0')}`;
+  const respHdr = `Responsable ${MESES[mes-1]} ${anio}`;
+  const data = [['Servicio','Equipo','Serie','Frecuencia','Programado','Estado equipo', respHdr, 'Días en estado']];
   STATE.equipos.forEach(e => {
     const prog = e.grilla?.[mes];
     if (prog !== 'X' && prog !== 'R') return;
     if ((e.historial||[]).some(h => h.mes === mes && h.resultado === 'SI')) return;
-    data.push([e.servicio||'', e.nombre||'', e.serie||'', e.frecuencia||'', prog, ESTADO_LABEL[e.estado]||e.estado, e.responsableMaster||'', fmt.daysSince(e.estadoDesde) ?? '']);
+    data.push([e.servicio||'', e.nombre||'', e.serie||'', e.frecuencia||'', prog, ESTADO_LABEL[e.estado]||e.estado, responsableDelPeriodo(e, periodo), fmt.daysSince(e.estadoDesde) ?? '']);
   });
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(data), `Pendientes ${MESES[mes-1]}`);
-  XLSX.writeFile(wb, `MP_pendientes_${now.getFullYear()}_${String(mes).padStart(2,'0')}.xlsx`);
+  XLSX.writeFile(wb, `MP_pendientes_${anio}_${String(mes).padStart(2,'0')}.xlsx`);
 }
 
 async function exportHistorialCompleto() {
@@ -5667,24 +6131,21 @@ VIEWS.agenda = {
     }
 
     // Estadísticas
-    const totalContactos = servicios.reduce((s, sv) => {
+    function filledCount(sv) {
       const c = getContacto(sv);
-      return s + CONTACTO_TIPOS.reduce((n, t) => {
-        const p = c[t.key] || {};
-        return n + (p.nombre || p.apellido || p.correo || p.celular || p.anexo ? 1 : 0);
-      }, 0);
-    }, 0);
-    const conAlgo = servicios.filter(sv => {
-      const c = getContacto(sv);
-      return CONTACTO_TIPOS.some(t => {
+      return CONTACTO_TIPOS.filter(t => {
         const p = c[t.key] || {};
         return p.nombre || p.apellido || p.correo || p.celular || p.anexo;
-      });
-    }).length;
+      }).length;
+    }
+    const conCompletos = servicios.filter(sv => filledCount(sv) === CONTACTO_TIPOS.length).length;
+    const conAlgo      = servicios.filter(sv => filledCount(sv) > 0).length;
+    const sinContactos = servicios.length - conAlgo;
+    const totalPersonas = servicios.reduce((s, sv) => s + filledCount(sv), 0);
 
     root.appendChild(viewHeader({
       title: 'Agenda · contactos por servicio',
-      desc: `${conAlgo} de ${servicios.length} servicios con al menos un contacto · ${totalContactos} personas registradas`,
+      desc: `${servicios.length} servicios · ${conCompletos} con contactos completos · ${sinContactos} sin contactos · ${totalPersonas} personas registradas`,
     }));
 
     // Controles
@@ -5945,6 +6406,105 @@ VIEWS.config = {
     ]);
     root.appendChild(card1);
 
+    // === Técnicos oficiales del SEC ===
+    const cardTec = h('div.card', { style:{ marginBottom:'14px' } });
+    cardTec.appendChild(h('div.card-h', [
+      h('h3','Técnicos oficiales del SEC'),
+      h('span.sub', `${STATE.tecnicosOficiales.length} cargado${STATE.tecnicosOficiales.length === 1 ? '' : 's'}`),
+    ]));
+    cardTec.appendChild(h('p', { style:{color:'var(--ink-3)', fontSize:'12px', margin:'0 0 10px 0'} },
+      'Lista oficial usada para autocompletar plantillas y filtros. Se combina con responsables de asignaciones mensuales y ejecutores históricos. El campo "Responsable MP" del maestro NO se considera fuente de verdad.'));
+    const tecList = h('div', { style:{display:'flex', flexWrap:'wrap', gap:'6px', marginBottom:'10px'} });
+    function renderTecList() {
+      tecList.innerHTML = '';
+      if (!STATE.tecnicosOficiales.length) {
+        tecList.appendChild(h('span', { style:{color:'var(--ink-4)', fontSize:'12px'} }, 'Sin técnicos oficiales cargados.'));
+      } else {
+        STATE.tecnicosOficiales.forEach(n => {
+          tecList.appendChild(h('span.pill', { style:{paddingRight:'2px', display:'inline-flex', alignItems:'center', gap:'4px'} }, [
+            h('span', n),
+            h('button.btn.icon.ghost', { title:'Quitar', style:{padding:'1px 4px', fontSize:'11px'}, onclick: () => {
+              STATE.tecnicosOficiales = STATE.tecnicosOficiales.filter(x => x !== n);
+              persist('tecnicosOficiales');
+              renderTecList();
+            } }, [ h('i.ti.ti-x', { style:{fontSize:'12px'} }) ]),
+          ]));
+        });
+      }
+    }
+    renderTecList();
+    cardTec.appendChild(tecList);
+    const tecInput = inputCtl({ placeholder:'Nombre del técnico…', style:{maxWidth:'320px'} });
+    cardTec.appendChild(h('div', { style:{display:'flex', gap:'6px'} }, [
+      tecInput,
+      h('button.btn', { onclick: () => {
+        const v = tecInput.value.trim();
+        if (!v) return;
+        if (!STATE.tecnicosOficiales.includes(v)) {
+          STATE.tecnicosOficiales.push(v);
+          STATE.tecnicosOficiales.sort((a,b) => a.localeCompare(b,'es'));
+          persist('tecnicosOficiales');
+          renderTecList();
+        }
+        tecInput.value = '';
+        tecInput.focus();
+      } }, [ h('i.ti.ti-plus'), 'Agregar' ]),
+    ]));
+    root.appendChild(cardTec);
+
+    // === Diferencias ignoradas ===
+    const cardIg = h('div.card', { style:{ marginBottom:'14px' } });
+    const igKeys = Object.keys(STATE.diffIgnorados);
+    cardIg.appendChild(h('div.card-h', [
+      h('h3','Diferencias del maestro ignoradas'),
+      h('span.sub', `${igKeys.length} decisión${igKeys.length === 1 ? '' : 'es'} persistida${igKeys.length === 1 ? '' : 's'}`),
+    ]));
+    cardIg.appendChild(h('p', { style:{color:'var(--ink-3)', fontSize:'12px', margin:'0 0 10px 0'} },
+      'Cuando ignorás una diferencia al reimportar el maestro, se guarda acá. Si revertís una decisión, esa diferencia volverá a aparecer en el próximo import si todavía está presente.'));
+    if (!igKeys.length) {
+      cardIg.appendChild(h('div', { style:{color:'var(--ink-4)', fontSize:'12px'} }, 'No hay decisiones de "ignorar" registradas.'));
+    } else {
+      const tbl = h('table.dt');
+      tbl.innerHTML = `<thead><tr><th>Equipo</th><th>Tipo</th><th>Detalle</th><th>Ignorado</th><th></th></tr></thead>`;
+      const tb = h('tbody');
+      igKeys.slice(0, 200).forEach(k => {
+        const parts = k.split('::');
+        const equipoUuid = parts[0];
+        const tipo = parts[1];
+        const detalle = parts.slice(2).join('::');
+        const ctx = STATE.diffIgnorados[k];
+        const eq = EQ.byUuid(equipoUuid);
+        tb.appendChild(h('tr', [
+          h('td', eq ? eq.nombre : (ctx?.contexto?.nombre || equipoUuid.slice(0,8))),
+          h('td', h('span.pill', tipo)),
+          h('td.truncate', detalle),
+          h('td', { style:{fontSize:'11px', color:'var(--ink-3)'} }, ctx?.ts ? fmt.rel(ctx.ts) : '—'),
+          h('td', h('button.btn.sm.ghost', { onclick: () => {
+            delete STATE.diffIgnorados[k];
+            persist('diffIgnorados');
+            Router.go('config');
+            UI.toast('Decisión revertida.', 'info');
+          } }, [ h('i.ti.ti-arrow-back'), 'Revertir' ])),
+        ]));
+      });
+      tbl.appendChild(tb);
+      cardIg.appendChild(h('div.table-wrap', [ tbl ]));
+      if (igKeys.length > 200) {
+        cardIg.appendChild(h('div', { style:{color:'var(--ink-3)', fontSize:'11px', marginTop:'6px'} }, `Mostrando 200 de ${igKeys.length}.`));
+      }
+      cardIg.appendChild(h('div', { style:{marginTop:'10px'} }, [
+        h('button.btn.danger.sm', { onclick: async () => {
+          const ok = await UI.dialog({ title:'Olvidar todas las decisiones', message:`¿Borrar las ${igKeys.length} decisiones de "ignorar"? Las diferencias volverán a aparecer en el próximo import.`, confirmText:'Olvidar todo', variant:'danger' });
+          if (!ok) return;
+          STATE.diffIgnorados = {};
+          persist('diffIgnorados');
+          UI.toast('Decisiones eliminadas.', 'warning');
+          Router.go('config');
+        } }, [ h('i.ti.ti-trash'), 'Olvidar todas las decisiones' ]),
+      ]));
+    }
+    root.appendChild(cardIg);
+
     const cardRec = h('div.card', { style:{marginBottom:'14px'} }, [
       h('div.card-h', [ h('h3','Grabación de sesión'), h('span.sub','Captura clicks, cambios y submits con timestamps para soporte/diagnóstico') ]),
       h('p', { style:{ color:'var(--ink-3)', fontSize:'12px', margin:'0 0 10px 0' } },
@@ -5968,7 +6528,7 @@ VIEWS.config = {
           });
           if (!ok) return;
           STORAGE.clearAll();
-          STATE.equipos = []; STATE.pendientes = []; STATE.asignaciones = {}; STATE.contactos = {}; STATE.session = {};
+          STATE.equipos = []; STATE.pendientes = []; STATE.asignaciones = {}; STATE.contactos = {}; STATE.session = {}; STATE.tecnicosOficiales = []; STATE.diffIgnorados = {};
           persist();
           UI.toast('Datos eliminados.', 'warning');
           Router.go('dash');
@@ -6087,7 +6647,7 @@ const CMDK = (() => {
     function renderHighlight() {
       $$('.cmdk-item', list).forEach((el, idx) => el.classList.toggle('is-active', idx === cursor));
       const active = $('.cmdk-item.is-active', list);
-      active?.scrollIntoView({ block:'nearest' });
+      try { active?.scrollIntoView?.({ block:'nearest' }); } catch {}
     }
     function runActive() {
       const active = $('.cmdk-item.is-active', list);
@@ -6174,6 +6734,21 @@ function boot() {
 }
 
 document.addEventListener('DOMContentLoaded', boot);
+
+// Hooks de inspección para harness de pruebas (jsdom). En producción son ignorados.
+try {
+  window.__pmp = {
+    STATE, EQ, MP, CICLO, PENDIENTE, UI, Theme, Router, VIEWS, bus,
+    importMaestroFile, importAsignacionMensual, exportPlantillaAsignacion,
+    abrirModalRegistrarMP, abrirModalVinculacionC2, abrirModalVinculacionC3,
+    alertasDeEquipo,
+    abrirModalDiferenciasMaestro, crearPendienteItemDiff,
+    diffKeyNuevo, diffKeyAusente, diffKeyCampo, diffKeyGrilla,
+    esDiffIgnorado, marcarDiffIgnorado, aplicarIgnoradosAlDiff,
+    agruparPorTecnico, periodoActual, periodoLabel, responsableDelPeriodo,
+    persist, loadState, normalize, fmt, h,
+  };
+} catch {}
 </script>
 
 </body>
