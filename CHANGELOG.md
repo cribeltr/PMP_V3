@@ -1,5 +1,19 @@
 # Changelog
 
+## It.7 — Pulido final · Fase 1 lista para uso
+
+- Dashboard rediseñado: KPI `MP cumplimiento %` (semáforo), KPI de
+  pendientes con marca de vencidos, KPI clickeable a Ciclos, sección
+  **Atenciones** con las primeras 5 alertas globales (causales sin
+  vincular, Grupo A >30d, SIGEM pendiente) cada una con click al
+  equipo afectado.
+- Retiro de `pmp_legacy.html` del repositorio.
+- `NOTAS_FASE_2.md` con guías para portar la lógica de causales,
+  ciclos, asignaciones y persistencia a Google Apps Script + Sheets +
+  Drive.
+- `ARCHITECTURE.md` actualizado con la tabla final de iteraciones y
+  estructura del repo.
+
 ## It.6 — Agenda + REC (grabación de sesión)
 
 - Vista **Agenda**: tarjeta por servicio clínico con resumen de

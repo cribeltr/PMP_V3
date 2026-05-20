@@ -3959,9 +3959,15 @@ VIEWS.dash = {
     const garan   = EQ.garantiasActivas().length;
     const ciclos  = EQ.ciclosAbiertos().length;
     const pendAb  = STATE.pendientes.filter(p => p.estado !== 'Cerrado').length;
+    const pendVencidos = STATE.pendientes.filter(p => p.estado !== 'Cerrado' && p.vence && new Date(p.vence) < new Date()).length;
     const now = new Date(); const mes = now.getMonth()+1;
-    const mpProgramadas = STATE.equipos.reduce((s,e) => s + (e.grilla?.[mes] === 'X' ? 1 : 0), 0);
+    const mpProgramadas = STATE.equipos.reduce((s,e) => s + ((e.grilla?.[mes] === 'X' || e.grilla?.[mes] === 'R') ? 1 : 0), 0);
     const mpEjecutadas  = STATE.equipos.reduce((s,e) => s + ((e.historial||[]).some(h => h.mes===mes && h.resultado==='SI') ? 1 : 0), 0);
+    const mpPendientes  = mpProgramadas - mpEjecutadas;
+    const pctCumpl = mpProgramadas ? Math.round(mpEjecutadas/mpProgramadas*100) : 0;
+
+    // Alertas globales
+    const alertasA = STATE.equipos.flatMap(e => alertasDeEquipo(e).map(a => ({...a, equipo: e}))).slice(0, 5);
 
     root.appendChild(viewHeader({
       title: 'Dashboard',
@@ -3999,11 +4005,27 @@ VIEWS.dash = {
     kpis.appendChild(kpiCard({ label: 'No operativos',   value: fmt.number(byEst.NoOperativo), kind: 'danger',  onclick: () => Router.go('inv', { estado: 'NoOperativo' }) }));
     kpis.appendChild(kpiCard({ label: 'En servicio técn.', value: fmt.number(byEst.ServicioTecnico), kind: 'warning', onclick: () => Router.go('inv', { estado: 'ServicioTecnico' }) }));
     kpis.appendChild(kpiCard({ label: 'En garantía',     value: fmt.number(garan),  kind: 'purple',  onclick: () => Router.go('inv', { garantia: 'si' }) }));
-    kpis.appendChild(kpiCard({ label: 'Ciclos abiertos', value: fmt.number(ciclos), kind: 'info' }));
-    kpis.appendChild(kpiCard({ label: `MP ${MESES[mes-1]} programadas`, value: fmt.number(mpProgramadas) }));
-    kpis.appendChild(kpiCard({ label: `MP ${MESES[mes-1]} ejecutadas`,  value: `${fmt.number(mpEjecutadas)} / ${fmt.number(mpProgramadas)}`, kind: 'success' }));
-    kpis.appendChild(kpiCard({ label: 'Pendientes abiertos', value: fmt.number(pendAb) }));
+    kpis.appendChild(kpiCard({ label: 'Ciclos abiertos', value: fmt.number(ciclos), kind: ciclos ? 'info' : 'muted', onclick: () => Router.go('ciclos') }));
+    kpis.appendChild(kpiCard({ label: `MP ${MESES[mes-1]} cumplimiento`, value: `${pctCumpl}%`, kind: pctCumpl >= 80 ? 'success' : pctCumpl >= 50 ? 'warning' : 'danger', onclick: () => Router.go('pmp') }));
+    kpis.appendChild(kpiCard({ label: `MP ${MESES[mes-1]} pendientes`,   value: `${fmt.number(mpPendientes)} / ${fmt.number(mpProgramadas)}`, kind: mpPendientes ? 'warning' : 'success', onclick: () => Router.go('pmp') }));
+    kpis.appendChild(kpiCard({ label: 'Tareas abiertas',     value: fmt.number(pendAb),       kind: pendVencidos ? 'danger' : (pendAb ? 'warning' : 'muted'), onclick: () => Router.go('tareas') }));
     root.appendChild(kpis);
+
+    // Alertas globales destacadas
+    if (alertasA.length) {
+      const sec = h('div.section');
+      sec.appendChild(h('h3', `Atenciones (${alertasA.length})`));
+      alertasA.forEach(a => {
+        sec.appendChild(h(`div.banner.${a.kind}`, { style:{ marginBottom:'6px' } }, [
+          h('i.ti', { class:'ti ' + (a.icon || 'ti-alert-circle') }),
+          h('div.grow', [
+            h('span', { style:{cursor:'pointer', fontWeight:500}, onclick: () => openFicha(a.equipo.uuid) }, a.equipo.nombre || '(sin nombre)'),
+            ' · ', a.text,
+          ]),
+        ]));
+      });
+      root.appendChild(sec);
+    }
 
     // Reciente
     const recientes = STATE.equipos

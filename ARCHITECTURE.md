@@ -159,23 +159,25 @@ Un solo `pmp.html`. Secciones marcadas con banners:
 // === BOOT ===
 ```
 
-## Roadmap de iteraciones (Fase 1)
+## Iteraciones entregadas (Fase 1)
 
-1. **It.1 — Foundation + Inventario.** Design system, persistence con
-   migración desde legacy, modal/drawer/toast/dialog, command palette,
-   vista Inventario + Ficha 360 (read-only), backup/restore JSON, import
-   maestro Excel, Dashboard básico.
-2. **It.2 — PMP.** Grilla anual, registro MP, causales C1–C8 con modal
-   de vinculación al ciclo (C2/C3), reprogramación (R), puesta en marcha
-   (PM), alertas Grupo A >30d.
-3. **It.3 — Ciclo correctivo.** Apertura rediseñada, modales por
-   eslabón, stepper, rutas A/B/C/D, garantía, borradores autoguardados,
-   edición retroactiva.
-4. **It.4 — Entregas + Asignación mensual.** Import Excel mensual,
-   agrupación por técnico, drill-down KPI, export plantilla.
-5. **It.5 — Reportes + Anexos.** Excel multi-hoja, Anexo 1/3/4/5,
-   informe por servicio, imprimir terreno.
-6. **It.6 — Tareas + Agenda + Config + REC.** Pendientes admin,
-   contactos por servicio, configuración (técnicos, familias), grabación
-   de sesión.
-7. **It.7 — Pulido + retiro de `pmp_legacy.html`.**
+| It | Alcance |
+|----|---------|
+| 1  | Foundation: design system, persistencia con migración legacy, modal/drawer/toast/dialog/popover, command palette, Inventario + Ficha 360, backup/restore JSON, import maestro, Dashboard básico. |
+| 1.1| Tema oscuro como default, toggle persistido. |
+| 2  | PMP: grilla anual y vista por mes, registro MP, causales C1–C8, modales de vinculación C2/C3, alertas Grupo A >30d, edición retroactiva. |
+| 3  | Ciclo correctivo: viewer único con stepper, rutas A/B/C, flag garantía, autoavance, borradores autoguardados, edición retroactiva por eslabón, cancelar/reabrir. |
+| 4  | Asignación mensual: import .xlsx con detección de período, vista Entregas con KPIs por técnico, modal "sin match", export de plantilla con dropdown de técnicos (data validation vía JSZip). |
+| 5  | Reportes Excel multi-hoja (Resumen / Inventario / En ST / MP pendientes / Historial / Pivote por servicio), informe mensual por servicio con KPIs y exporte/impresión, anexos imprimibles 1/3/4/5 condicionados por estado del equipo. |
+| 6  | Agenda · contactos por servicio (drawer lateral), REC con redacción automática de campos sensibles. |
+| 7  | Pulido final: Dashboard con atenciones globales, retiro de `pmp_legacy.html`, NOTAS_FASE_2 con guidance para portar a Apps Script. |
+
+## Estructura final del repo
+
+```
+PMP_V3/
+├── pmp.html              ← aplicación autocontenida (~5700 líneas)
+├── ARCHITECTURE.md       ← este archivo
+├── CHANGELOG.md          ← historial de iteraciones
+└── NOTAS_FASE_2.md       ← notas para el port a Google Apps Script
+```
