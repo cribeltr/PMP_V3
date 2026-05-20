@@ -1,5 +1,23 @@
 # Changelog
 
+## It.6 — Agenda + REC (grabación de sesión)
+
+- Vista **Agenda**: tarjeta por servicio clínico con resumen de
+  contactos cargados; click abre drawer lateral con form completo
+  (supervisor, encargado de equipos, jefe del CR — cada uno con
+  nombre, apellido, correo, anexo, celular) + notas. Persistido en
+  `pmp.v3.contactos`.
+- **REC** (grabación de sesión):
+  - Chip dedicado en la sidebar con dot rojo pulsante y contador en
+    vivo de eventos capturados.
+  - Captura click / change / submit con timestamps, elemento (tag #id
+    .class), coordenadas y valor.
+  - **Redacción automática** de campos sensibles (SIGEM, folio,
+    password).
+  - Al detener: descarga el log JSON + backup completo emparejado.
+  - Accesible desde la sidebar, desde Configuración y desde el
+    command palette (Ctrl+K).
+
 ## It.5 — Reportes, informes y anexos imprimibles
 
 - Vista **Reportes** con tres bloques:

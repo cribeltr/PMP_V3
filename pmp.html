@@ -519,6 +519,7 @@ hr { border: 0; border-top: .5px solid var(--line); margin: 0; }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes slide-up { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes slide-right { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes pulseDot { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
 
 .modal {
   background: var(--paper);
@@ -840,6 +841,7 @@ hr { border: 0; border-top: .5px solid var(--line); margin: 0; }
 
     <div class="sidebar-footer">
       <div class="session-chip" id="sessionChip"></div>
+      <div id="recChip" style="margin-bottom:2px;"></div>
       <button class="btn ghost sm" id="themeToggle" title="Cambiar tema" style="justify-content:flex-start;">
         <i class="ti ti-moon-stars"></i>
         <span id="themeToggleLabel">Tema oscuro</span>
@@ -3737,6 +3739,164 @@ function renderReparacion(push, snap, onChange) {
 }
 
 /* ============================================================
+   DOMAIN · contactos por servicio
+   ============================================================ */
+const CONTACTO_TIPOS = [
+  { key: 'supervisor',        label: 'Supervisor' },
+  { key: 'encargadoEquipos',  label: 'Encargado de equipos' },
+  { key: 'jefeCR',            label: 'Jefe del CR' },
+];
+const PERSONA_CAMPOS = ['nombre','apellido','correo','anexo','celular'];
+
+function emptyContacto() {
+  return {
+    supervisor:       Object.fromEntries(PERSONA_CAMPOS.map(k => [k,''])),
+    encargadoEquipos: Object.fromEntries(PERSONA_CAMPOS.map(k => [k,''])),
+    jefeCR:           Object.fromEntries(PERSONA_CAMPOS.map(k => [k,''])),
+    notas: '',
+  };
+}
+
+function getContacto(servicio) {
+  return STATE.contactos[servicio] || emptyContacto();
+}
+function setContacto(servicio, data) {
+  STATE.contactos[servicio] = data;
+  persist('contactos');
+}
+
+/* ============================================================
+   REC · grabación de sesión
+   ============================================================ */
+const REC = (() => {
+  let active = false;
+  let startedAt = null;
+  let events = [];
+  let handlers = [];
+
+  function on(target, evt, fn, opts) {
+    target.addEventListener(evt, fn, opts);
+    handlers.push(() => target.removeEventListener(evt, fn, opts));
+  }
+
+  function describeEl(el) {
+    if (!el || !el.tagName) return '';
+    let s = el.tagName.toLowerCase();
+    if (el.id) s += '#' + el.id;
+    if (el.className && typeof el.className === 'string') s += '.' + el.className.split(/\s+/).slice(0,2).join('.');
+    return s;
+  }
+
+  function maybeRedact(field, value) {
+    if (!field) return value;
+    const f = (field + '').toLowerCase();
+    if (f.includes('sigem') || f.includes('folio')) return '«REDACTED»';
+    return value;
+  }
+
+  function truncate(v) {
+    const s = String(v ?? '');
+    return s.length > 120 ? s.slice(0,120) + '…' : s;
+  }
+
+  function pushEvent(ev) {
+    events.push(ev);
+    if (events.length > 50000) events.shift();
+    const dot = document.getElementById('recDot');
+    if (dot) dot.textContent = `REC · ${events.length}`;
+  }
+
+  function start() {
+    if (active) return;
+    active = true;
+    startedAt = new Date().toISOString();
+    events = [];
+
+    on(document, 'click', (e) => {
+      pushEvent({
+        ts: new Date().toISOString(),
+        tipo: 'click',
+        elemento: describeEl(e.target),
+        x: e.clientX, y: e.clientY,
+      });
+    }, { capture: true });
+
+    on(document, 'change', (e) => {
+      const t = e.target;
+      if (!t) return;
+      const field = t.id || t.name || describeEl(t);
+      let val = '';
+      if (t.type === 'file') val = '[file]';
+      else if (t.type === 'password') val = '«REDACTED»';
+      else val = truncate(maybeRedact(field, t.value));
+      pushEvent({
+        ts: new Date().toISOString(),
+        tipo: 'change',
+        elemento: describeEl(t),
+        campo: field,
+        valor: val,
+      });
+    }, { capture: true });
+
+    on(document, 'submit', (e) => {
+      pushEvent({ ts: new Date().toISOString(), tipo: 'submit', elemento: describeEl(e.target) });
+    }, { capture: true });
+
+    updateChip();
+    UI.toast('Grabación iniciada. Aparece un indicador rojo en la sidebar.', 'info', { duration: 4000 });
+  }
+
+  function stop({ downloadBackup = true } = {}) {
+    if (!active) return null;
+    active = false;
+    handlers.forEach(off => { try { off(); } catch {} });
+    handlers = [];
+    const payload = {
+      sesion: { inicio: startedAt, fin: new Date().toISOString(), totalEventos: events.length, appVersion: APP_VERSION },
+      eventos: events,
+    };
+    const ts = new Date().toISOString().replace(/[:.]/g,'-');
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type:'application/json' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `pmp_rec_${ts}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+
+    if (downloadBackup) {
+      try { exportBackup(); } catch {}
+    }
+
+    events = [];
+    startedAt = null;
+    updateChip();
+    UI.toast(`Grabación detenida (${payload.sesion.totalEventos} eventos). Archivo descargado.`, 'success', { duration: 5000 });
+    return payload;
+  }
+
+  function toggle() { active ? stop() : start(); }
+  function isActive() { return active; }
+
+  function updateChip() {
+    const wrap = document.getElementById('recChip');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    if (active) {
+      wrap.appendChild(h('button.btn.sm.danger', { onclick: () => stop(), title:'Detener grabación' }, [
+        h('span', { id:'recDot', style:{ display:'inline-flex', alignItems:'center', gap:'6px' } }, [
+          h('span', { style:{width:'8px', height:'8px', borderRadius:'50%', background:'#dc2626', display:'inline-block', animation:'pulseDot 1.4s ease-in-out infinite'} }),
+          `REC · ${events.length}`,
+        ]),
+        h('i.ti.ti-player-stop', { style:{marginLeft:'6px'} }),
+      ]));
+    } else {
+      wrap.appendChild(h('button.btn.ghost.sm', { onclick: () => start(), title:'Iniciar grabación de sesión' }, [
+        h('i.ti.ti-record-mail'), 'Grabar sesión',
+      ]));
+    }
+  }
+
+  return { start, stop, toggle, isActive, updateChip };
+})();
+
+/* ============================================================
    UI · sidebar + topbar + router
    ============================================================ */
 function renderNav() {
@@ -5190,7 +5350,94 @@ async function exportHistorialCompleto() {
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), 'Historial');
   XLSX.writeFile(wb, `historial_completo_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
-VIEWS.agenda   = soonView('Agenda · Contactos', 'Contactos por servicio clínico: It.6.');
+VIEWS.agenda = {
+  title: 'Agenda',
+  render(root) {
+    root.appendChild(viewHeader({
+      title: 'Agenda · contactos por servicio',
+      desc: 'Datos de supervisor, encargado de equipos y jefe del CR de cada servicio clínico.',
+    }));
+    const servicios = EQ.servicios();
+    if (!servicios.length) {
+      root.appendChild(emptyState({ icon:'ti-address-book', title:'Sin servicios', desc:'Cargá el inventario maestro primero.' }));
+      return;
+    }
+    const grid = h('div', { style:{display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(280px,1fr))', gap:'10px'} });
+    servicios.forEach(s => grid.appendChild(renderContactoCard(s)));
+    root.appendChild(grid);
+  },
+};
+
+function renderContactoCard(servicio) {
+  const c = getContacto(servicio);
+  const equiposCount = STATE.equipos.filter(e => e.servicio === servicio).length;
+  const filled = CONTACTO_TIPOS.filter(t => {
+    const p = c[t.key] || {};
+    return p.nombre || p.apellido || p.correo || p.celular || p.anexo;
+  }).length;
+  const card = h('div.card', { style:{cursor:'pointer'}, onclick: () => abrirDrawerContacto(servicio) }, [
+    h('div', { style:{display:'flex', alignItems:'center', gap:'8px', marginBottom:'6px'} }, [
+      h('div', { style:{flex:1, fontWeight:500, fontSize:'13px'} }, servicio),
+      h('span.pill.muted', `${equiposCount}`),
+    ]),
+    h('div', { style:{color:'var(--ink-3)', fontSize:'11.5px'} }, [
+      filled
+        ? `${filled} de 3 contactos cargados`
+        : 'Sin contactos cargados',
+    ]),
+    h('div', { style:{display:'flex', flexDirection:'column', gap:'2px', marginTop:'10px', fontSize:'11.5px'} },
+      CONTACTO_TIPOS.map(t => {
+        const p = c[t.key] || {};
+        const nombre = [p.nombre, p.apellido].filter(Boolean).join(' ');
+        return h('div', { style:{display:'flex', gap:'6px'} }, [
+          h('span', { style:{color:'var(--ink-3)', width:'90px', flexShrink:0} }, t.label + ':'),
+          h('span', { style:{color: nombre?'var(--ink-2)':'var(--ink-4)'} }, nombre || '—'),
+        ]);
+      })),
+  ]);
+  return card;
+}
+
+function abrirDrawerContacto(servicio) {
+  const draft = JSON.parse(JSON.stringify(getContacto(servicio)));
+  const equiposCount = STATE.equipos.filter(e => e.servicio === servicio).length;
+
+  UI.drawer({
+    title: servicio,
+    content: (body, { close }) => {
+      body.appendChild(h('p', { style:{margin:'0 0 14px 0', color:'var(--ink-3)', fontSize:'12px'} },
+        `${equiposCount} equipos en este servicio.`));
+      CONTACTO_TIPOS.forEach(t => {
+        body.appendChild(h('h4', { style:{fontSize:'12px', textTransform:'uppercase', letterSpacing:'.05em', color:'var(--ink-3)', margin:'12px 0 6px'} }, t.label));
+        const p = draft[t.key] || (draft[t.key] = {});
+        body.appendChild(row('1fr 1fr', [
+          field('Nombre',   inputCtl({ value: p.nombre || '',   oninput:(e)=> p.nombre = e.target.value })),
+          field('Apellido', inputCtl({ value: p.apellido || '', oninput:(e)=> p.apellido = e.target.value })),
+        ]));
+        body.appendChild(row('1fr 1fr', [
+          field('Correo',   inputCtl({ type:'email', value: p.correo || '', oninput:(e)=> p.correo = e.target.value })),
+          field('Celular',  inputCtl({ value: p.celular || '', oninput:(e)=> p.celular = e.target.value })),
+        ]));
+        body.appendChild(field('Anexo',  inputCtl({ value: p.anexo || '', oninput:(e)=> p.anexo = e.target.value })));
+      });
+      body.appendChild(h('h4', { style:{fontSize:'12px', textTransform:'uppercase', letterSpacing:'.05em', color:'var(--ink-3)', margin:'12px 0 6px'} }, 'Notas'));
+      body.appendChild(field('', textareaCtl({ rows:3, value: draft.notas || '', oninput:(e)=> draft.notas = e.target.value })));
+    },
+    footer: (f, { close }) => {
+      f.appendChild(h('button.btn.ghost', { onclick: close }, 'Cerrar'));
+      f.appendChild(h('button.btn', { onclick: () => {
+        setContacto(servicio, emptyContacto());
+        UI.toast('Contactos del servicio borrados.', 'warning');
+        close(); Router.go('agenda');
+      } }, [ h('i.ti.ti-trash'), 'Borrar' ]));
+      f.appendChild(h('button.btn.primary', { onclick: () => {
+        setContacto(servicio, draft);
+        UI.toast('Contactos guardados.', 'success');
+        close(); Router.go('agenda');
+      } }, [ h('i.ti.ti-device-floppy'), 'Guardar' ]));
+    },
+  });
+}
 
 VIEWS.config = {
   title: 'Configuración',
@@ -5219,6 +5466,18 @@ VIEWS.config = {
       ]),
     ]);
     root.appendChild(card1);
+
+    const cardRec = h('div.card', { style:{marginBottom:'14px'} }, [
+      h('div.card-h', [ h('h3','Grabación de sesión'), h('span.sub','Captura clicks, cambios y submits con timestamps para soporte/diagnóstico') ]),
+      h('p', { style:{ color:'var(--ink-3)', fontSize:'12px', margin:'0 0 10px 0' } },
+        'Los valores de campos sensibles (folio SIGEM, contraseñas) se redactan automáticamente. Al detener se descarga el log JSON y un backup completo.'),
+      h('div', { style:{display:'flex', gap:'8px'} }, [
+        REC.isActive()
+          ? h('button.btn.danger', { onclick: () => { REC.stop(); Router.go('config'); } }, [ h('i.ti.ti-player-stop'), 'Detener grabación' ])
+          : h('button.btn', { onclick: () => { REC.start(); Router.go('config'); } }, [ h('i.ti.ti-record-mail'), 'Iniciar grabación' ]),
+      ]),
+    ]);
+    root.appendChild(cardRec);
 
     const card2 = h('div.card', [
       h('div.card-h', [ h('h3','Mantenimiento'), h('span.sub','Operaciones destructivas — usar con cuidado') ]),
@@ -5289,6 +5548,7 @@ const CMDK = (() => {
       { group:'Acciones', label:'Descargar backup',         icon:'ti-database-export', run: exportBackup },
       { group:'Acciones', label:'Restaurar backup',         icon:'ti-database-import', run: importBackup },
       { group:'Acciones', label:'Alternar tema claro/oscuro', icon:'ti-contrast-2', run: () => Theme.toggle() },
+      { group:'Acciones', label: REC.isActive() ? 'Detener grabación de sesión' : 'Iniciar grabación de sesión', icon:'ti-record-mail', run: () => REC.toggle() },
     ];
     const navs = NAV_ITEMS.map(it => ({
       group:'Ir a', label: it.label, icon: it.icon, run: () => Router.go(it.id), meta: it.soon ? 'pronto' : '',
@@ -5409,9 +5669,13 @@ function boot() {
     renderNav();
     renderSessionChip();
     Theme.syncToggle();
+    REC.updateChip();
     $('#themeToggle').addEventListener('click', () => Theme.toggle());
     $('#openCmdk').addEventListener('click', () => CMDK.open());
     bus.on('state:change', () => renderSessionChip());
+
+    // Periodic chip update for REC events counter
+    setInterval(() => { if (REC.isActive()) REC.updateChip(); }, 1500);
 
     $('#bootScreen').remove();
     $('#app').hidden = false;
