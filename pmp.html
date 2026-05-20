@@ -960,6 +960,24 @@ const RESULTADO_LABEL = {
 const TIPOS_BAJA = ['Obsolescencia','Falla irreparable','Robo/pérdida','Traslado a otro establecimiento','Otro'];
 const DETECCIONES_APERTURA = ['Servicio clínico avisó','Detectado en MP','Detectado en ronda','Otro'];
 
+/**
+ * Técnicos oficiales del SEC. Lista cerrada para el dropdown bloqueado en
+ * todos los campos "responsable" / "ejecutor". Orden institucional (NO alfabético).
+ */
+const TECNICOS_OFICIALES = [
+  'Ricardo Matus Aroca',
+  'Ignacio Berner Bergara',
+  'Matías Soazo Garrido',
+  'Daniel Díaz Neira',
+  'Tito Millapán Riquelme',
+  'Carlos Bahamondes Seguel',
+  'Cristián Beltrán Oviedo',
+  'Cristina Rozas Urrutia',
+  'Macarena Toledo',
+  'Marco Ulloa',
+  'Personal externo',
+];
+
 const NAV_ITEMS = [
   { id: 'dash',     label: 'Dashboard',  icon: 'ti-layout-dashboard' },
   { id: 'inv',      label: 'Inventario', icon: 'ti-stethoscope' },
@@ -1850,6 +1868,108 @@ function pushEvento(equipo, ev) {
   });
 }
 
+/**
+ * Devuelve { title, desc, icon, color } para presentar un evento en el timeline.
+ * Tipos conocidos tienen ícono/título amigables; los desconocidos caen al genérico.
+ */
+function describeEvento(ev) {
+  const p = ev.payload || {};
+  const tipos = {
+    MP: () => ({
+      title: `MP — ${p.resultado || '—'}${p.mes ? ' (' + MESES[(p.mes||1)-1] + ')' : ''}`,
+      desc: [p.ejecutor && 'Ejecutor: ' + p.ejecutor, p.obs].filter(Boolean).join(' · '),
+      icon: 'ti-calendar-check', color: p.resultado === 'SI' ? 'success' : (CAUSALES[p.resultado] ? 'warning' : 'info'),
+    }),
+    'MP-edicion': () => ({
+      title: 'Edición de registro MP',
+      desc: p.cambios ? 'Campos modificados: ' + Object.keys(p.cambios).join(', ') : '',
+      icon: 'ti-edit', color: 'ink-3',
+    }),
+    SOLICITUD_TRABAJO: () => ({
+      title: 'Solicitud de trabajo',
+      desc: p.desc || `Folio ${p.folioSigem || '(sin folio)'}: ${p.descripcion || ''}${p.responsable ? ' · Recibió: ' + p.responsable : ''}`,
+      icon: 'ti-file-text', color: 'info',
+    }),
+    ESTADO: () => ({
+      title: `Cambio de estado: ${p.de || '—'} → ${p.a || '—'}`,
+      desc: p.origen ? 'Origen: ' + p.origen : '',
+      icon: 'ti-arrow-right-circle', color: p.a === 'Operativo' ? 'success' : (p.a === 'NoOperativo' || p.a === 'FueraDeServicio' ? 'danger' : 'warning'),
+    }),
+    'APERTURA-CICLO': () => ({
+      title: 'Apertura de ciclo correctivo',
+      desc: [p.descripcion, p.folioSigem && 'Folio SIGEM ' + p.folioSigem, p.deteccion && 'Detección: ' + p.deteccion].filter(Boolean).join(' · '),
+      icon: 'ti-tools', color: 'warning',
+    }),
+    'CICLO-CIERRE': () => ({
+      title: 'Cierre de ciclo correctivo',
+      desc: p.motivo || '',
+      icon: 'ti-circle-check', color: 'success',
+    }),
+    'CICLO-CANCEL': () => ({
+      title: 'Ciclo correctivo cancelado',
+      desc: p.motivo || '',
+      icon: 'ti-ban', color: 'danger',
+    }),
+    'CICLO-REABRIR': () => ({
+      title: 'Ciclo correctivo reabierto', desc: '', icon: 'ti-refresh', color: 'warning',
+    }),
+    'CICLO-LOOP': () => ({
+      title: 'Ciclo correctivo · loop a Envío',
+      desc: p.motivo || 'Recepción no funcionó, se vuelve a enviar.',
+      icon: 'ti-arrow-back', color: 'warning',
+    }),
+    EDICION_RETROACTIVA: () => ({
+      title: `Edición retroactiva · ${ESLABONES_LABEL[p.eslabon] || p.eslabon || 'eslabón'}`,
+      desc: p.fechaPrev && p.fechaNueva ? `Fecha: ${fmt.date(p.fechaPrev)} → ${fmt.date(p.fechaNueva)}` : '',
+      icon: 'ti-history', color: 'ink-3',
+    }),
+    'CAUSAL-VINCULADA': () => ({
+      title: `Causal ${p.causal || ''} vinculada al ciclo`,
+      desc: p.envio ? 'Vinculada al envío.' : 'Vinculada al ciclo correctivo.',
+      icon: 'ti-link', color: 'info',
+    }),
+    'CAUSAL-PENDIENTE-CLINICO': () => ({
+      title: `Causal ${p.causal || ''} con pendiente al servicio clínico`,
+      desc: 'Se creó pendiente para que el servicio clínico genere el folio SIGEM.',
+      icon: 'ti-clipboard-text', color: 'warning',
+    }),
+    ENVIO: () => ({
+      title: 'Envío a servicio técnico',
+      desc: [p.folioEnvio && 'Folio ' + p.folioEnvio, p.empresa, p.responsable].filter(Boolean).join(' · '),
+      icon: 'ti-truck-delivery', color: 'warning',
+    }),
+    GRILLA: () => ({
+      title: `Grilla · ${MESES[(p.mes||1)-1]}`,
+      desc: `${p.anterior || '∅'} → ${p.valor || '∅'}`,
+      icon: 'ti-table', color: 'ink-3',
+    }),
+    'SIGEM-COMPLETADO': () => ({
+      title: 'Folio SIGEM completado',
+      desc: p.folio ? 'Folio: ' + p.folio : '',
+      icon: 'ti-circle-check', color: 'success',
+    }),
+  };
+  // Eslabones del ciclo: CICLO-DIAGNOSTICO, CICLO-COMPRA, CICLO-GARANTIA, CICLO-ENVIO, CICLO-RECEPCION, CICLO-REPARACION, CICLO-APERTURA
+  const m = ev.tipo && ev.tipo.match(/^CICLO-(APERTURA|DIAGNOSTICO|COMPRA|GARANTIA|ENVIO|RECEPCION|REPARACION)$/);
+  if (m) {
+    const es = m[1].toLowerCase();
+    return {
+      title: `Ciclo · ${ESLABONES_LABEL[es] || es}`,
+      desc: [p.obs, p.empresa, p.folioEnvio && 'Folio ' + p.folioEnvio, p.estado, p.proveedor].filter(Boolean).join(' · '),
+      icon: es === 'reparacion' ? 'ti-tool' : es === 'envio' ? 'ti-truck-delivery' : es === 'recepcion' ? 'ti-package' : es === 'compra' ? 'ti-shopping-cart' : es === 'garantia' ? 'ti-shield-check' : es === 'diagnostico' ? 'ti-stethoscope' : 'ti-flag',
+      color: 'info',
+    };
+  }
+  const builder = tipos[ev.tipo];
+  if (builder) return builder();
+  // Default genérico
+  return {
+    title: ev.tipo || 'Evento',
+    desc: typeof p === 'string' ? p : (p && Object.keys(p).length ? Object.entries(p).slice(0,4).map(([k,v]) => `${k}: ${typeof v === 'object' ? '…' : v}`).join(' · ') : ''),
+    icon: 'ti-circle-dot', color: 'ink-3',
+  };
+}
+
 /* ============================================================
    DOMAIN · alertas (Grupo A > 30d, sigem pendiente, etc.)
    ============================================================ */
@@ -2482,12 +2602,27 @@ function detectarPeriodoArchivo(name) {
 /* ============================================================
    EXPORT · plantilla mensual (XLSX con validación de lista)
    ============================================================ */
+/**
+ * Genera la Plantilla de Asignación Mensual con el formato institucional exacto:
+ * - Hoja "Asignación" (con tilde) con 13 columnas en orden: Carpeta · Inventario ·
+ *   Equipo · Servicio · Unidad · Ubicación · Marca · Modelo · Serie · Año ·
+ *   Frecuencia MP · Programado en mes · Responsable.
+ * - Hoja "Responsables_oficiales" VISIBLE (NO oculta) con TECNICOS_OFICIALES.
+ * - autoFilter sobre A1:M{N} y definedName _xlnm._FilterDatabase.
+ * - dataValidation tipo list en M2:M{N} con promptTitle + prompt + tildes UTF-8.
+ *
+ * IMPORTANTE — corrección R3 de un bug R2: la versión anterior marcaba la hoja
+ * Responsables como Hidden:1. Excel resuelve referencias inter-hoja en
+ * dataValidation de forma menos fiable cuando la hoja destino está oculta, y la
+ * plantilla institucional de referencia la deja visible. openpyxl no detectaba
+ * el problema porque acepta ambas formas; Excel real no. Solución: hoja visible.
+ */
 async function exportPlantillaAsignacion(periodo) {
   await ensureXLSX();
   await ensureJSZip();
-  // Filtrar a equipos con marca de grilla en el mes del período (X/R/PM/RA).
-  // De este modo cada plantilla mensual contiene solo lo que realmente toca ese mes.
+
   const mesNum = Number((periodo || periodoActual()).split('-')[1]);
+  const anio   = Number((periodo || periodoActual()).split('-')[0]);
   const equipos = STATE.equipos.filter(e => {
     if (e.esSlot || e.estado === 'DeBaja') return false;
     const g = e.grilla?.[mesNum];
@@ -2496,8 +2631,8 @@ async function exportPlantillaAsignacion(periodo) {
   if (!equipos.length) {
     throw new Error(`No hay equipos con MP programada (X/R/PM/RA) en ${periodoLabel(periodo)}. Revisá la grilla anual antes de exportar.`);
   }
-  const tecnicos = sugerirTecnicos();
-  // Pre-llenado: asignación del período actual; si no hay, busca la última asignación del equipo en cualquier período previo.
+
+  // Pre-llenado del Responsable: período actual primero; si no hay, asignación previa más reciente.
   const periodos = listaPeriodos();
   function ultimoResponsable(equipoUuid) {
     if ((STATE.asignaciones[periodo] || {})[equipoUuid]) return STATE.asignaciones[periodo][equipoUuid];
@@ -2508,16 +2643,21 @@ async function exportPlantillaAsignacion(periodo) {
     return '';
   }
 
-  const headers = ['Carpeta','N° Inventario','N° Serie','Equipo','Servicio','Familia','Frecuencia MP','Prog. ' + MESES[mesNum-1],'Responsable'];
+  // === Hoja 1: Asignación (con tilde) ===
+  const headers = ['N° Carpeta','N° Inventario','Equipo','Servicio','Unidad','Ubicación','Marca','Modelo','Serie','Año','Frecuencia MP','Programado en mes','Responsable'];
   const data = [headers];
   equipos.forEach(e => {
     data.push([
       e.carpeta ?? '',
       e.inventario || '',
-      e.serie || '',
       e.nombre || '',
       e.servicio || '',
-      e.fam || '',
+      e.unidad || '',
+      e.ubicacion || '',
+      e.marca || '',
+      e.modelo || '',
+      e.serie || '',
+      e.anio || '',
       e.frecuencia || '',
       e.grilla?.[mesNum] || '',
       ultimoResponsable(e.uuid),
@@ -2526,55 +2666,77 @@ async function exportPlantillaAsignacion(periodo) {
 
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet(data);
-  ws['!cols'] = [{wch:10},{wch:14},{wch:14},{wch:32},{wch:22},{wch:18},{wch:14},{wch:10},{wch:26}];
-  XLSX.utils.book_append_sheet(wb, ws, 'Asignacion');
+  ws['!cols'] = [
+    {wch:10},  // N° Carpeta
+    {wch:14},  // N° Inventario
+    {wch:32},  // Equipo
+    {wch:22},  // Servicio
+    {wch:22},  // Unidad
+    {wch:22},  // Ubicación
+    {wch:16},  // Marca
+    {wch:18},  // Modelo
+    {wch:18},  // Serie
+    {wch:8},   // Año
+    {wch:16},  // Frecuencia MP
+    {wch:18},  // Programado en mes
+    {wch:30},  // Responsable
+  ];
+  XLSX.utils.book_append_sheet(wb, ws, 'Asignación');
 
-  const tecData = [['Tecnicos'], ...tecnicos.map(t => [t])];
+  // === Hoja 2: Responsables_oficiales (VISIBLE) ===
+  const tecData = [['Responsable oficial'], ...TECNICOS_OFICIALES.map(t => [t])];
   const wsT = XLSX.utils.aoa_to_sheet(tecData);
-  XLSX.utils.book_append_sheet(wb, wsT, 'Tecnicos');
-
-  // Marcar la hoja "Tecnicos" como oculta via Workbook.Sheets (SheetJS escribe state="hidden" correctamente).
+  wsT['!cols'] = [{wch:36}];
+  XLSX.utils.book_append_sheet(wb, wsT, 'Responsables_oficiales');
+  // Ambas hojas visibles. Sin Hidden.
   wb.Workbook = wb.Workbook || {};
   wb.Workbook.Sheets = wb.Workbook.Sheets || [];
-  const idxAsign = wb.SheetNames.indexOf('Asignacion');
-  const idxTec   = wb.SheetNames.indexOf('Tecnicos');
-  wb.Workbook.Sheets[idxAsign] = Object.assign(wb.Workbook.Sheets[idxAsign] || {}, { Hidden: 0 });
-  wb.Workbook.Sheets[idxTec]   = Object.assign(wb.Workbook.Sheets[idxTec]   || {}, { Hidden: 1 });
+  wb.Workbook.Sheets[0] = Object.assign(wb.Workbook.Sheets[0] || {}, { Hidden: 0 });
+  wb.Workbook.Sheets[1] = Object.assign(wb.Workbook.Sheets[1] || {}, { Hidden: 0 });
 
-  // Build initial xlsx
-  const ab = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  const ab = XLSX.write(wb, { bookType:'xlsx', type:'array' });
 
-  // Inyectar dataValidation. Per ECMA-376 debe ir DESPUÉS de </sheetData>
-  // y ANTES de elementos posteriores como <ignoredErrors> (#28), <pageMargins> (#21), etc.
-  // SheetJS escribe <ignoredErrors> inmediatamente después de </sheetData>; si pegamos antes
-  // de </worksheet> queda 28→18→fin, lo cual Excel rechaza como archivo dañado.
-  // La inserción más robusta es justo después de </sheetData>.
+  // ===== Patches del XML =====
   const zip = await JSZip.loadAsync(ab);
   const sheetPath = 'xl/worksheets/sheet1.xml';
   let xml = await zip.file(sheetPath).async('string');
-  const lastRow = equipos.length + 1;
-  const tecLast = Math.max(2, tecnicos.length + 1);
+  const lastRow = equipos.length + 1;            // header + filas
+  const tecLast = TECNICOS_OFICIALES.length + 1;  // 11 + header = 12
+  const sqrefAll = `A1:M${lastRow}`;
+  const sqrefResp = `M2:M${lastRow}`;
+
+  // 1) <autoFilter> tras </sheetData>
+  const autoFilter = `<autoFilter ref="${sqrefAll}"/>`;
+  // 2) <dataValidations> después de <autoFilter> y antes de <ignoredErrors>
+  //    (per ECMA-376 el orden válido es: sheetData (6) → autoFilter (11) →
+  //     dataValidations (18) → ignoredErrors (28))
   const validation =
     `<dataValidations count="1">` +
     `<dataValidation type="list" allowBlank="1" showInputMessage="1" showErrorMessage="1" ` +
-    `errorTitle="Responsable invalido" error="Elegi un tecnico de la lista." ` +
-    `sqref="I2:I${lastRow}">` +
-    `<formula1>Tecnicos!$A$2:$A$${tecLast}</formula1>` +
+    `errorTitle="Responsable no válido" error="Elegí un técnico de la lista oficial." ` +
+    `promptTitle="Asignar responsable" prompt="Elegí un técnico de la lista desplegable." ` +
+    `sqref="${sqrefResp}">` +
+    `<formula1>Responsables_oficiales!$A$2:$A$${tecLast}</formula1>` +
     `</dataValidation></dataValidations>`;
-  if (!tecnicos.length) {
-    // Sin técnicos disponibles: no inyectamos validación (evitamos formula1 con rango inválido).
-  } else if (xml.includes('</sheetData>')) {
-    xml = xml.replace('</sheetData>', '</sheetData>' + validation);
-  } else {
-    // Fallback (no debería ocurrir con SheetJS)
-    xml = xml.replace('</worksheet>', validation + '</worksheet>');
-  }
+  xml = xml.replace('</sheetData>', '</sheetData>' + autoFilter + validation);
   zip.file(sheetPath, xml);
 
+  // 3) <definedNames> en workbook.xml para que Excel active el autofiltro al abrir.
+  let wbXml = await zip.file('xl/workbook.xml').async('string');
+  const dn = `<definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0">&apos;Asignación&apos;!$A$1:$M$${lastRow}</definedName></definedNames>`;
+  if (!wbXml.includes('<definedNames>')) {
+    wbXml = wbXml.replace('</sheets>', '</sheets>' + dn);
+  } else {
+    wbXml = wbXml.replace('</definedNames>', dn.replace('<definedNames>','').replace('</definedNames>','') + '</definedNames>');
+  }
+  zip.file('xl/workbook.xml', wbXml);
+
   const out = await zip.generateAsync({ type: 'blob' });
+  const mesAbr = MESES[mesNum-1];   // 'Ene', 'Feb', ...
+  const filename = `Plantilla_Asignacion_${mesAbr}_${anio}.xlsx`;
   const a = document.createElement('a');
   a.href = URL.createObjectURL(out);
-  a.download = `plantilla_asignacion_${periodo}.xlsx`;
+  a.download = filename;
   document.body.appendChild(a); a.click(); a.remove();
 }
 
@@ -3543,6 +3705,39 @@ function selectCtl(opts, value='', attrs={}) {
   return s;
 }
 function textareaCtl(attrs={}) { return h('textarea.textarea', attrs); }
+
+/**
+ * Dropdown bloqueado de técnicos oficiales del SEC. Reemplaza el patrón
+ * `<input list="ejecutores-list">` que no obligaba a elegir y dependía
+ * del historial (que arranca vacío). Opciones en orden institucional.
+ * @param value valor actual; si no está en la lista igual se preserva.
+ * @param attrs atributos del <select> (onchange, name, etc.)
+ * @param opts.placeholder texto del primer item disabled (default "— Elegí técnico —")
+ * @param opts.includeOtros si true, agrega también ejecutores/responsables
+ *   históricos al final de la lista oficial (para edición de registros viejos).
+ */
+function selectTecnico(value='', attrs={}, opts={}) {
+  const placeholder = opts.placeholder || '— Elegí técnico —';
+  const s = h('select.select', attrs);
+  const phOpt = h('option', { value: '', disabled: true }, placeholder);
+  if (!value) phOpt.selected = true;
+  s.appendChild(phOpt);
+  TECNICOS_OFICIALES.forEach(n => s.appendChild(h('option', { value: n }, n)));
+  // Si el valor actual no está en la lista oficial, lo preservamos como opción extra.
+  if (value && !TECNICOS_OFICIALES.includes(value)) {
+    s.appendChild(h('option', { value, selected: true }, value + ' (histórico)'));
+  }
+  if (opts.includeOtros) {
+    const extra = EQ.ejecutores().filter(n => !TECNICOS_OFICIALES.includes(n) && n !== value);
+    if (extra.length) {
+      const grp = h('optgroup', { label: 'Históricos' });
+      extra.forEach(n => grp.appendChild(h('option', { value: n }, n)));
+      s.appendChild(grp);
+    }
+  }
+  if (value && TECNICOS_OFICIALES.includes(value)) s.value = value;
+  return s;
+}
 function row(cols, children) {
   return h('div', { style:{ display:'grid', gridTemplateColumns: cols, gap:'12px', marginBottom:'10px' } }, children);
 }
@@ -3551,7 +3746,7 @@ function row(cols, children) {
    UI · MODALES: registrar MP, vinculación causal, SIGEM, reprogramar, PM
    ============================================================ */
 function abrirModalRegistrarMP(equipo, opts={}) {
-  const ejecutoresPrev = EQ.ejecutores();
+  // Listado de técnicos: usa TECNICOS_OFICIALES vía selectTecnico (no datalist histórico).
   const initialMes = opts.mes || (new Date().getMonth() + 1);
   const initialFecha = opts.fecha || todayISO();
 
@@ -3679,15 +3874,10 @@ function abrirModalRegistrarMP(equipo, opts={}) {
       }
       renderCond();
 
-      const ejInput = inputCtl({
-        placeholder: 'Nombre del ingeniero / técnico ejecutor',
-        value: snap.ejecutor,
-        list: 'ejecutores-list',
-        oninput: (e) => snap.ejecutor = e.target.value,
-      });
-      const datalist = h('datalist', { id:'ejecutores-list' });
-      ejecutoresPrev.forEach(n => datalist.appendChild(h('option', { value: n })));
-      const fEj = field('Ejecutor responsable', h('div', [ejInput, datalist]));
+      const ejSelect = selectTecnico(snap.ejecutor, {
+        onchange: (e) => { snap.ejecutor = e.target.value; renderMotivo(); },
+      }, { includeOtros: !!editing });
+      const fEj = field('Ejecutor responsable *', ejSelect, 'Elegí un técnico de la lista oficial del SEC.');
 
       const fObs = field('Observación', textareaCtl({ rows: 3, value: snap.obs, oninput:(e)=> snap.obs = e.target.value }));
 
@@ -3701,7 +3891,6 @@ function abrirModalRegistrarMP(equipo, opts={}) {
           }), 'Obligatorio cuando se cambia el ejecutor de un registro existente.'));
         }
       }
-      ejInput.addEventListener('input', renderMotivo);
       renderMotivo();
 
       body.appendChild(row('1fr 200px', [fFecha, fMes]));
@@ -3718,6 +3907,7 @@ function abrirModalRegistrarMP(equipo, opts={}) {
         try {
           const fechaISO = isoFromDateInput(snap.fechaEvento);
           if (!fechaISO) throw new Error('Fecha inválida.');
+          if (!snap.ejecutor || !snap.ejecutor.trim()) throw new Error('Elegí un ejecutor de la lista oficial del SEC.');
           if (editing && snap.ejecutor && snap.ejecutor !== ejecutorOriginal && !snap.motivoCambioEjecutor.trim()) {
             throw new Error('Indicá el motivo del cambio de ejecutor.');
           }
@@ -3817,7 +4007,7 @@ function abrirModalVinculacionC3(equipo, mp) {
           ]));
           formArea.appendChild(row('1fr 1fr', [
             field('Folio SIGEM', inputCtl({ value: snap.folioSigem, placeholder:'p. ej. 2026-12345', oninput:(e)=> snap.folioSigem = e.target.value })),
-            field('Responsable', inputCtl({ value: snap.responsable, oninput:(e)=> snap.responsable = e.target.value })),
+            field('Responsable', selectTecnico(snap.responsable, { onchange:(e)=> snap.responsable = e.target.value })),
           ]));
           formArea.appendChild(field('Descripción del problema', textareaCtl({ rows:3, value: snap.descripcion, oninput:(e)=> snap.descripcion = e.target.value })));
         } else if (modo === 'pendiente') {
@@ -3826,7 +4016,7 @@ function abrirModalVinculacionC3(equipo, mp) {
             field('Detección', selectCtl(DETECCIONES_APERTURA, snap.deteccion, { onchange:(e)=> snap.deteccion = e.target.value })),
           ]));
           formArea.appendChild(row('1fr 1fr', [
-            field('Responsable', inputCtl({ value: snap.responsable, oninput:(e)=> snap.responsable = e.target.value })),
+            field('Responsable', selectTecnico(snap.responsable, { onchange:(e)=> snap.responsable = e.target.value })),
             field('Vencimiento (días hábiles)', inputCtl({ type:'number', min:1, max:30, value: snap.diasVencimientoPendiente, oninput:(e)=> snap.diasVencimientoPendiente = Number(e.target.value)||3 })),
           ]));
           formArea.appendChild(field('Descripción para el pendiente', textareaCtl({ rows:3, value: snap.descripcion, oninput:(e)=> snap.descripcion = e.target.value })));
@@ -3958,7 +4148,7 @@ function abrirModalVinculacionC2(equipo, mp) {
           ]));
           formArea.appendChild(row('1fr 1fr', [
             field('Folio de envío', inputCtl({ value: snap.folioEnvio, oninput:(e)=> snap.folioEnvio = e.target.value })),
-            field('Responsable', inputCtl({ value: snap.responsable, oninput:(e)=> snap.responsable = e.target.value })),
+            field('Responsable', selectTecnico(snap.responsable, { onchange:(e)=> snap.responsable = e.target.value })),
           ]));
           formArea.appendChild(field('Descripción / contexto', textareaCtl({ rows:2, value: snap.descripcion, oninput:(e)=> snap.descripcion = e.target.value })));
         }
@@ -4300,7 +4490,7 @@ function renderApertura(push, snap, onChange, equipo, ciclo) {
   ]));
   push(field('Descripción del problema *', textareaCtl({ rows:3, value: s.descripcion, oninput:(e)=> { s.descripcion = e.target.value; fire(); } })));
   push(row('1fr 1fr', [
-    field('Responsable', inputCtl({ value: s.responsable, oninput:(e)=> { s.responsable = e.target.value; fire(); } })),
+    field('Responsable', selectTecnico(s.responsable, { onchange:(e)=> { s.responsable = e.target.value; fire(); } })),
     field('Estado SIGEM', selectCtl([
       { value:'falta',    label:'Falta gestionar' },
       { value:'existe',   label:'Ya existe' },
@@ -4404,7 +4594,7 @@ function renderEnvio(push, snap, onChange) {
   ]));
   push(row('1fr 1fr', [
     field('Folio de envío', inputCtl({ value: s.folioEnvio, oninput:(e)=> { s.folioEnvio = e.target.value; fire(); } })),
-    field('Responsable del envío', inputCtl({ value: s.responsable, oninput:(e)=> { s.responsable = e.target.value; fire(); } })),
+    field('Responsable del envío', selectTecnico(s.responsable, { onchange:(e)=> { s.responsable = e.target.value; fire(); } })),
   ]));
   push(h('div.banner.info', [ h('i.ti.ti-info-circle'), h('div.grow', 'Al guardar, el equipo pasa a En Servicio Técnico con esta fecha.') ]));
   return () => {
@@ -4451,19 +4641,50 @@ const CONTACTO_TIPOS = [
   { key: 'encargadoEquipos',  label: 'Encargado de equipos' },
   { key: 'jefeCR',            label: 'Jefe del CR' },
 ];
-const PERSONA_CAMPOS = ['nombre','apellido','correo','anexo','celular'];
+const PERSONA_CAMPOS = ['nombreCompleto','correo','anexo','celular'];
 
+function emptyPersona() { return Object.fromEntries(PERSONA_CAMPOS.map(k => [k,''])); }
 function emptyContacto() {
   return {
-    supervisor:       Object.fromEntries(PERSONA_CAMPOS.map(k => [k,''])),
-    encargadoEquipos: Object.fromEntries(PERSONA_CAMPOS.map(k => [k,''])),
-    jefeCR:           Object.fromEntries(PERSONA_CAMPOS.map(k => [k,''])),
+    supervisor:       emptyPersona(),
+    encargadoEquipos: emptyPersona(),
+    jefeCR:           emptyPersona(),
     notas: '',
   };
 }
 
+/** Migra una persona del esquema viejo {nombre, apellido} al nuevo {nombreCompleto}. */
+function migrarPersona(p) {
+  if (!p || typeof p !== 'object') return emptyPersona();
+  const out = emptyPersona();
+  // Si ya tiene nombreCompleto, lo respetamos.
+  if (p.nombreCompleto) {
+    out.nombreCompleto = p.nombreCompleto;
+  } else if (p.nombre || p.apellido) {
+    out.nombreCompleto = [p.nombre, p.apellido].filter(Boolean).join(' ').trim();
+  }
+  if (p.correo)  out.correo  = p.correo;
+  if (p.anexo)   out.anexo   = p.anexo;
+  if (p.celular) out.celular = p.celular;
+  return out;
+}
+
 function getContacto(servicio) {
-  return STATE.contactos[servicio] || emptyContacto();
+  const raw = STATE.contactos[servicio];
+  if (!raw) return emptyContacto();
+  // Migración silenciosa: si alguna persona tiene {nombre, apellido} se unifica.
+  let needsSave = false;
+  const migrated = { notas: raw.notas || '' };
+  CONTACTO_TIPOS.forEach(t => {
+    const p = raw[t.key] || {};
+    if (p.nombre !== undefined || p.apellido !== undefined) needsSave = true;
+    migrated[t.key] = migrarPersona(p);
+  });
+  if (needsSave) {
+    STATE.contactos[servicio] = migrated;
+    persist('contactos');
+  }
+  return migrated;
 }
 function setContacto(servicio, data) {
   STATE.contactos[servicio] = data;
@@ -5066,6 +5287,7 @@ function openFicha(uuid) {
     footer: (f, { close }) => {
       f.appendChild(h('button.btn.ghost', { onclick: close }, 'Cerrar'));
       f.appendChild(h('button.btn', { onclick: () => { close(); abrirModalRegistrarMP(e); } }, [ h('i.ti.ti-calendar-plus'), 'Registrar MP' ]));
+      f.appendChild(h('button.btn', { onclick: () => { close(); abrirModalSolicitudTrabajo(e); } }, [ h('i.ti.ti-file-text'), 'Solicitud de trabajo' ]));
       const cicloAbierto = (e.correctivos||[]).find(c => c.abierto);
       f.appendChild(h(`button.btn.primary ${cicloAbierto?'ghost':''}`.trim(), {
         onclick: () => {
@@ -5074,6 +5296,87 @@ function openFicha(uuid) {
           else              abrirModalAperturaCiclo(e);
         },
       }, [ h('i.ti.ti-tools'), cicloAbierto ? 'Ver ciclo en curso' : 'Abrir ciclo correctivo' ]));
+    },
+  });
+}
+
+/**
+ * Modal "Solicitud de trabajo" — evento puro, sin ciclo correctivo.
+ * Si el equipo está Operativo, pasa a NoOperativo con la fecha real.
+ * Si ya está en otro estado, registra el evento pero NO cambia el estado.
+ */
+function abrirModalSolicitudTrabajo(equipo) {
+  let snap = {
+    fechaEvento: todayISO(),
+    folioSigem: '',
+    descripcion: '',
+    responsable: '',
+  };
+  UI.modal({
+    title: 'Solicitud de trabajo',
+    sub: equipo.nombre,
+    size: 'md',
+    content: (body) => {
+      body.appendChild(h('p', { style:{margin:'0 0 12px 0', color:'var(--ink-2)', fontSize:'12.5px'} },
+        'Registra una solicitud SIGEM o aviso del servicio clínico sin activar el ciclo correctivo completo. Si más adelante el caso amerita el flujo formal, podés abrir el ciclo desde el mismo botón.'));
+      body.appendChild(row('1fr 1fr', [
+        field('Fecha real de la solicitud *', dateCtl(snap.fechaEvento, { max: todayISO(), onchange:(e)=> snap.fechaEvento = e.target.value }), 'Admite registro retroactivo. No puede ser futura.'),
+        field('Folio SIGEM', inputCtl({ value: snap.folioSigem, placeholder:'p. ej. 19-5988', oninput:(e)=> snap.folioSigem = e.target.value }), 'Opcional — si todavía no hay folio, dejalo vacío.'),
+      ]));
+      body.appendChild(field('Descripción del problema *', textareaCtl({ rows:3, value: snap.descripcion, oninput:(e)=> snap.descripcion = e.target.value })));
+      body.appendChild(field('Responsable que recibe la solicitud *', selectTecnico(snap.responsable, { onchange:(e)=> snap.responsable = e.target.value })));
+      // Aviso sobre cambio de estado
+      const aviso = equipo.estado === 'Operativo'
+        ? `Al guardar, el equipo pasa a No Operativo con la fecha indicada.`
+        : `El equipo está ${ESTADO_LABEL[equipo.estado] || equipo.estado}. Se registra la solicitud pero NO cambia de estado.`;
+      body.appendChild(h('div.banner.info', { style:{marginTop:'8px'} }, [
+        h('i.ti.ti-info-circle'),
+        h('div.grow', aviso),
+      ]));
+    },
+    footer: (f, { close }) => {
+      f.appendChild(h('button.btn.ghost', { onclick: close }, 'Cancelar'));
+      f.appendChild(h('button.btn.primary', { onclick: () => {
+        try {
+          const fechaISO = isoFromDateInput(snap.fechaEvento);
+          if (!fechaISO) throw new Error('Fecha inválida.');
+          if (new Date(fechaISO) > new Date(Date.now() + 86400000)) throw new Error('La fecha no puede ser futura.');
+          if (!snap.descripcion.trim()) throw new Error('Falta la descripción.');
+          if (!snap.responsable) throw new Error('Elegí un responsable de la lista.');
+          const folio = snap.folioSigem.trim();
+          const descTxt = `Solicitud de trabajo · Folio ${folio || '(sin folio)'}: ${snap.descripcion.trim()}`;
+          // Evento principal
+          pushEvento(equipo, {
+            tipo: 'SOLICITUD_TRABAJO',
+            ts: fechaISO,
+            payload: {
+              folioSigem: folio || null,
+              descripcion: snap.descripcion.trim(),
+              responsable: snap.responsable,
+              desc: descTxt,
+              cambioEstado: equipo.estado === 'Operativo',
+            },
+          });
+          let cambioEstado = false;
+          if (equipo.estado === 'Operativo') {
+            equipo.estado = 'NoOperativo';
+            equipo.estadoDesde = fechaISO;
+            pushEvento(equipo, {
+              tipo: 'ESTADO',
+              ts: fechaISO,
+              payload: { de: 'Operativo', a: 'NoOperativo', origen: 'SOLICITUD_TRABAJO' },
+            });
+            cambioEstado = true;
+          }
+          persist('equipos');
+          UI.toast(cambioEstado
+            ? `Solicitud registrada · equipo marcado No Operativo (${fmt.date(fechaISO)}).`
+            : `Solicitud registrada · estado del equipo sin cambios.`,
+            'success', { duration: 5000 });
+          close('save');
+          if (STATE.view) Router.go(STATE.view, STATE.viewParams);
+        } catch (e) { bus.emit('error', e); }
+      }}, [ h('i.ti.ti-device-floppy'), 'Registrar solicitud' ]));
     },
   });
 }
@@ -5102,7 +5405,7 @@ function abrirModalAperturaCiclo(equipo) {
       ]));
       body.appendChild(field('Descripción del problema *', textareaCtl({ rows:3, oninput:(e)=> snap.descripcion = e.target.value })));
       body.appendChild(row('1fr 1fr', [
-        field('Responsable que recibe el caso *', inputCtl({ oninput:(e)=> snap.responsable = e.target.value })),
+        field('Responsable que recibe el caso *', selectTecnico(snap.responsable, { onchange:(e)=> snap.responsable = e.target.value })),
         field('Estado de la solicitud SIGEM', selectCtl([
           { value:'falta',    label:'Falta gestionar con servicio clínico (por defecto)' },
           { value:'existe',   label:'Ya existe — tengo el folio' },
@@ -5241,11 +5544,15 @@ function renderFichaTab(id, e) {
       if (!evs.length) { wrap.appendChild(emptyTabHint('Aún no hay eventos en el timeline.')); break; }
       const tl = h('div.timeline');
       evs.forEach(ev => {
+        const meta = describeEvento(ev);
         tl.appendChild(h('div.tl-item', [
           h('div.tl-date', [ fmt.date(ev.ts), h('div',{style:{color:'var(--ink-4)',fontSize:'10.5px'}}, fmt.rel(ev.ts)) ]),
           h('div.tl-body', [
-            h('div.title', ev.tipo || '—'),
-            ev.payload ? h('div.desc', typeof ev.payload === 'string' ? ev.payload : JSON.stringify(ev.payload)) : null,
+            h('div.title', { style:{display:'flex', alignItems:'center', gap:'6px'} }, [
+              h('i.ti', { class:'ti ' + meta.icon, style:{ color: 'var(--' + meta.color + ')', fontSize:'14px' } }),
+              meta.title,
+            ]),
+            meta.desc ? h('div.desc', meta.desc) : null,
           ]),
         ]));
       });
@@ -5899,7 +6206,7 @@ function abrirModalNuevaTarea() {
     content: (body) => {
       body.appendChild(field('Descripción *', textareaCtl({ rows:3, oninput:(e)=> snap.descripcion = e.target.value })));
       body.appendChild(row('1fr 1fr', [
-        field('Asignado a', inputCtl({ oninput:(e)=> snap.asignado = e.target.value })),
+        field('Asignado a', selectTecnico(snap.asignado, { onchange:(e)=> snap.asignado = e.target.value })),
         field('Vencimiento', dateCtl(snap.vence, { onchange:(e)=> snap.vence = e.target.value })),
       ]));
       const opts = [{ value:'', label:'(sin equipo)' }, ...STATE.equipos.slice(0,500).map(e => ({ value: e.uuid, label: `${e.nombre} · ${e.serie || e.inventario || ''}` }))];
@@ -6176,7 +6483,7 @@ VIEWS.agenda = {
       const c = getContacto(sv);
       return CONTACTO_TIPOS.filter(t => {
         const p = c[t.key] || {};
-        return p.nombre || p.apellido || p.correo || p.celular || p.anexo;
+        return p.nombreCompleto || p.correo || p.celular || p.anexo;
       }).length;
     }
     const conCompletos = servicios.filter(sv => filledCount(sv) === CONTACTO_TIPOS.length).length;
@@ -6192,7 +6499,7 @@ VIEWS.agenda = {
     // Controles
     const search = h('div.search', { style:{flex:1} }, [
       h('i.ti.ti-search'),
-      h('input', { type:'text', placeholder:'Buscar servicio o persona (nombre, apellido, correo)…', value: params.q || '' }),
+      h('input', { type:'text', placeholder:'Buscar servicio o persona (nombre completo o correo)…', value: params.q || '' }),
     ]);
     let filtro = params.filtro || 'todos';   // 'todos' | 'con' | 'sin'
     let orden  = params.orden  || 'sin-primero';
@@ -6227,7 +6534,7 @@ VIEWS.agenda = {
       const c = getContacto(sv);
       const filled = CONTACTO_TIPOS.filter(t => {
         const p = c[t.key] || {};
-        return p.nombre || p.apellido || p.correo || p.celular || p.anexo;
+        return p.nombreCompleto || p.correo || p.celular || p.anexo;
       }).length;
       return { c, filled };
     }
@@ -6239,7 +6546,7 @@ VIEWS.agenda = {
       const c = getContacto(sv);
       return CONTACTO_TIPOS.some(t => {
         const p = c[t.key] || {};
-        return [p.nombre, p.apellido, p.correo].some(v => v && normalize(v).includes(n));
+        return [p.nombreCompleto, p.correo].some(v => v && normalize(v).includes(n));
       });
     }
 
@@ -6299,7 +6606,7 @@ function renderContactoCard(servicio) {
     const p = c[t.key] || {};
     const lleno = p.nombre || p.apellido || p.correo || p.celular || p.anexo;
     if (lleno) {
-      const nombre = [p.nombre, p.apellido].filter(Boolean).join(' ') || '(sin nombre)';
+      const nombre = (p.nombreCompleto || '').trim() || '(sin nombre)';
       card.appendChild(h('div', {
         style:{display:'flex', alignItems:'baseline', gap:'8px', padding:'6px 0', borderTop:'.5px solid var(--line)', fontSize:'12px'},
       }, [
@@ -6336,18 +6643,19 @@ function renderContactoCard(servicio) {
 function abrirQuickContacto(servicio, tipoKey) {
   const c = getContacto(servicio);
   const tipo = CONTACTO_TIPOS.find(t => t.key === tipoKey);
-  const draft = Object.assign({ nombre:'', apellido:'', correo:'', anexo:'', celular:'' }, c[tipoKey] || {});
-  const yaCargado = !!(draft.nombre || draft.apellido || draft.correo || draft.celular || draft.anexo);
+  const draft = Object.assign(emptyPersona(), c[tipoKey] || {});
+  const yaCargado = !!(draft.nombreCompleto || draft.correo || draft.celular || draft.anexo);
 
   UI.modal({
     title: `${yaCargado?'Editar':'Agregar'} ${tipo.label.toLowerCase()}`,
     sub: servicio,
     size: 'sm',
     content: (body) => {
-      body.appendChild(row('1fr 1fr', [
-        field('Nombre',   inputCtl({ value: draft.nombre,   autofocus:true, oninput:(e)=> draft.nombre = e.target.value })),
-        field('Apellido', inputCtl({ value: draft.apellido, oninput:(e)=> draft.apellido = e.target.value })),
-      ]));
+      body.appendChild(field('Nombre completo *', inputCtl({
+        value: draft.nombreCompleto, autofocus: true,
+        placeholder: 'ej. DANIELA CAROLINA GUERRA MOURGUET',
+        oninput:(e)=> draft.nombreCompleto = e.target.value,
+      })));
       body.appendChild(field('Correo', inputCtl({ type:'email', value: draft.correo, oninput:(e)=> draft.correo = e.target.value })));
       body.appendChild(row('1fr 1fr', [
         field('Celular', inputCtl({ value: draft.celular, oninput:(e)=> draft.celular = e.target.value })),
@@ -6361,7 +6669,7 @@ function abrirQuickContacto(servicio, tipoKey) {
           const ok = await UI.dialog({ title:`Borrar ${tipo.label.toLowerCase()}`, message: `¿Borrar este contacto de ${servicio}?`, confirmText:'Borrar', variant:'danger' });
           if (!ok) return;
           const updated = Object.assign({}, c);
-          updated[tipoKey] = { nombre:'', apellido:'', correo:'', anexo:'', celular:'' };
+          updated[tipoKey] = emptyPersona();
           setContacto(servicio, updated);
           UI.toast('Contacto borrado.', 'warning');
           close(); Router.go('agenda');
@@ -6389,11 +6697,12 @@ function abrirDrawerContacto(servicio) {
         `${equiposCount} equipos en este servicio.`));
       CONTACTO_TIPOS.forEach(t => {
         body.appendChild(h('h4', { style:{fontSize:'12px', textTransform:'uppercase', letterSpacing:'.05em', color:'var(--ink-3)', margin:'12px 0 6px'} }, t.label));
-        const p = draft[t.key] || (draft[t.key] = {});
-        body.appendChild(row('1fr 1fr', [
-          field('Nombre',   inputCtl({ value: p.nombre || '',   oninput:(e)=> p.nombre = e.target.value })),
-          field('Apellido', inputCtl({ value: p.apellido || '', oninput:(e)=> p.apellido = e.target.value })),
-        ]));
+        const p = draft[t.key] || (draft[t.key] = emptyPersona());
+        body.appendChild(field('Nombre completo', inputCtl({
+          value: p.nombreCompleto || '',
+          placeholder: 'ej. DANIELA CAROLINA GUERRA MOURGUET',
+          oninput:(e)=> p.nombreCompleto = e.target.value,
+        })));
         body.appendChild(row('1fr 1fr', [
           field('Correo',   inputCtl({ type:'email', value: p.correo || '', oninput:(e)=> p.correo = e.target.value })),
           field('Celular',  inputCtl({ value: p.celular || '', oninput:(e)=> p.celular = e.target.value })),

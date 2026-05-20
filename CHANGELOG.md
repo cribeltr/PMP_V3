@@ -1,5 +1,123 @@
 # Changelog
 
+## Fase 1 · Iteración R3 — Solicitud de trabajo · Nombre completo · Plantilla institucional · Dropdowns bloqueados
+
+### 1. Botón "+ Solicitud de trabajo" en la ficha
+
+Nuevo botón al lado de "+ Ciclo correctivo" (`ti-file-text`). Abre un
+modal liviano con: fecha real (admite retroactivo, max hoy), folio
+SIGEM opcional, descripción obligatoria, responsable obligatorio
+elegido del dropdown bloqueado.
+
+Comportamiento:
+- Si el equipo está `Operativo`: pasa a `NoOperativo` con
+  `estadoDesde = fechaEvento`. Genera evento `ESTADO` y `SOLICITUD_TRABAJO`.
+- Si el equipo ya está en otro estado: registra `SOLICITUD_TRABAJO` con
+  un banner informativo, NO cambia el estado.
+- **No crea ciclo correctivo.** Es evento puro.
+
+El timeline tiene mapeo nuevo `describeEvento()` que renderiza tipos
+conocidos con ícono y título amigable (`SOLICITUD_TRABAJO` →
+`ti-file-text` azul; también `ESTADO`, `APERTURA-CICLO`, `CICLO-*`,
+`EDICION_RETROACTIVA`, `CAUSAL-*`, `GRILLA`, `MP`, etc.). Antes se
+mostraba el tipo crudo y el payload JSON.stringify-eado.
+
+### 2. Contactos de Agenda: campo único "Nombre completo"
+
+`PERSONA_CAMPOS` cambió de `['nombre','apellido','correo','anexo','celular']`
+a `['nombreCompleto','correo','anexo','celular']`.
+
+- Drawer y modal quick-add reemplazaron los dos inputs por uno solo
+  con placeholder `"ej. DANIELA CAROLINA GUERRA MOURGUET"`.
+- `getContacto()` migra silenciosamente registros viejos:
+  `nombreCompleto = (nombre + ' ' + apellido).trim()` y persiste.
+- Card y buscador leen `nombreCompleto` directamente. El placeholder
+  del buscador se actualizó.
+
+### 3. Plantilla XLSX: formato institucional exacto
+
+Reescritura completa de `exportPlantillaAsignacion()` para igualar
+byte-a-byte la plantilla institucional de referencia
+(`Plantilla_Asignacion_Jul_2026.xlsx`):
+
+**Hoja `Asignación`** (con tilde, sheetId=1) — 13 columnas:
+N° Carpeta · N° Inventario · Equipo · Servicio · Unidad · Ubicación ·
+Marca · Modelo · Serie · Año · Frecuencia MP · Programado en mes ·
+Responsable.
+
+(R2 tenía 9 columnas con nombres distintos: faltaban Unidad,
+Ubicación, Marca, Modelo, Año. Decía "N° Serie" y "Prog. {Mes}";
+ahora "Serie" y "Programado en mes".)
+
+**Hoja `Responsables_oficiales`** (sheetId=2) — **VISIBLE**, no oculta.
+Header "Responsable oficial" + 11 técnicos en orden institucional.
+
+**`<autoFilter ref="A1:M{N}"/>`** tras `</sheetData>` para activar
+embudos en cada encabezado.
+
+**`<definedNames>`** en `workbook.xml`:
+`_xlnm._FilterDatabase` localSheetId 0 → `'Asignación'!$A$1:$M$N`.
+
+**`<dataValidations>`** después del autoFilter:
+- `errorTitle="Responsable no válido"`, `error="Elegí un técnico de la lista oficial."` (tildes en UTF-8, no ASCII puro como R2)
+- `promptTitle="Asignar responsable"`, `prompt="Elegí un técnico de la lista desplegable."` (NUEVOS — R2 no los tenía)
+- `sqref="M2:M{N}"` (columna M, no I como R2)
+- `formula1="Responsables_oficiales!$A$2:$A$12"`
+
+**Nombre del archivo**: `Plantilla_Asignacion_{MesAbr}_{Año}.xlsx`
+(ejemplo: `Plantilla_Asignacion_Jul_2026.xlsx`).
+
+**Por qué el dropdown de R2 no funcionaba** (corrección de la
+hipótesis errónea de R2): la causa REAL del archivo dañado en Excel
+no era el orden de elementos (eso ya estaba bien después del fix
+intermedio), sino que la hoja Tecnicos estaba marcada como
+`Hidden:1`. Excel resuelve referencias inter-hoja en `dataValidation`
+de forma menos confiable cuando la hoja destino está oculta. **openpyxl
+no detectaba este problema** porque su validador es más permisivo que
+Excel — sus assertions de "OK" en R2 dieron una falsa sensación de
+seguridad. La plantilla institucional de referencia deja la hoja
+visible y por eso funciona. Solución: hoja `Responsables_oficiales`
+visible.
+
+### 4. Dropdown bloqueado de Técnicos Oficiales del SEC
+
+**Constante restaurada** `TECNICOS_OFICIALES` con 11 nombres en orden
+institucional: Ricardo Matus Aroca · Ignacio Berner Bergara · Matías
+Soazo Garrido · Daniel Díaz Neira · Tito Millapán Riquelme · Carlos
+Bahamondes Seguel · Cristián Beltrán Oviedo · Cristina Rozas Urrutia
+· Macarena Toledo · Marco Ulloa · Personal externo.
+
+**Helper nuevo** `selectTecnico(value, attrs, opts)` construye un
+`<select>` con placeholder no seleccionable + 11 opciones oficiales
++ valor histórico (si el dato actual no está en la lista oficial, se
+preserva como opción extra para no perder información de registros
+viejos). Opcional `includeOtros: true` agrega un `<optgroup>` con
+ejecutores históricos para edición retroactiva.
+
+**Reemplazo en 6 modales** (de `<input list>` con datalist a
+`<select>` real con dropdown visual):
+- Modal Registrar MP — campo Ejecutor (validación: obligatorio)
+- Modal Apertura de ciclo — campo Responsable
+- Modal Vinculación C3 (opciones "nuevo" y "pendiente") — Responsable
+- Modal Vinculación C2 — Responsable
+- Modal Envío del ciclo correctivo — Responsable del envío
+- Modal Solicitud de trabajo (nuevo en este R3) — Responsable
+- Modal Nueva tarea — Asignado a
+
+`EQ.ejecutores()` (lee del historial) sigue existiendo y se usa para
+filtros, no para selección al registrar.
+
+### Verificación R3
+
+| # | Flujo | Resultado |
+|---|-------|-----------|
+| Suite 1-15 + 4b + 7 + R2 | Sin regresiones | OK · 21 sims verdes |
+| R3.1a | Solicitud de trabajo sobre equipo Operativo | OK · equipo → NoOperativo con fecha real · evento `SOLICITUD_TRABAJO` + `ESTADO` · sin ciclo correctivo |
+| R3.1b | Solicitud sobre equipo ya en ServicioTecnico | OK · evento registrado · estado NO cambia |
+| R3.2 | Migración contactos `{nombre,apellido}` → `{nombreCompleto}` | OK · se unifican, se persiste, no se pierden correo/anexo/celular |
+| R3.3 | selectTecnico en modal Registrar MP | OK · 12 opciones (placeholder + 11) · primer técnico institucional es Ricardo Matus Aroca |
+| Plantilla XLSX | Inspección byte-a-byte vs referencia | OK · 13 columnas en orden exacto · ambas hojas visibles · autoFilter A1:M{N} · definedName `_xlnm._FilterDatabase` · dataValidation con `promptTitle`/`prompt` y tildes UTF-8 · sqref M2:M{N} · formula1 Responsables_oficiales!$A$2:$A$12 · nombre `Plantilla_Asignacion_Jul_2026.xlsx` |
+
 ## Fase 1 · Iteración R2 — Fixes del feedback de uso
 
 ### 1. Inventario muestra columna ID
