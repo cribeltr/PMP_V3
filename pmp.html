@@ -2877,10 +2877,15 @@ function periodoLabel(p) {
 
 function agruparPorTecnico(periodo) {
   const asign = STATE.asignaciones[periodo] || {};
+  const tieneArchivo = !!asign.__meta;
   const groups = new Map();
   const equiposActivos = STATE.equipos.filter(e => !e.esSlot && e.estado !== 'DeBaja');
   equiposActivos.forEach(e => {
-    const resp = asign[e.uuid] || '(sin asignar)';
+    // Si hay archivo cargado para el período, se usa estricto.
+    // Si NO hay archivo, se cae al responsableMaster del maestro Excel.
+    const resp = tieneArchivo
+      ? (asign[e.uuid] || '(sin asignar)')
+      : (e.responsableMaster || '(sin asignar)');
     if (!groups.has(resp)) groups.set(resp, []);
     groups.get(resp).push(e);
   });
@@ -4424,6 +4429,7 @@ VIEWS.inv = {
     tbl.innerHTML = `<thead><tr>
       <th>Servicio</th>
       <th>Equipo</th>
+      <th>Carpeta</th>
       <th>Inventario</th>
       <th>Serie</th>
       <th>Marca / Modelo</th>
@@ -4468,7 +4474,7 @@ VIEWS.inv = {
       if (rendered >= current.length) sentinel.style.display = 'none';
       else sentinel.style.display = '';
     }
-    const sentinel = h('tr', { style:{} }, [ h('td', { colspan: 7, style:{textAlign:'center', color:'var(--ink-3)', padding:'10px', fontSize:'11.5px'} }, 'Cargando más…') ]);
+    const sentinel = h('tr', { style:{} }, [ h('td', { colspan: 8, style:{textAlign:'center', color:'var(--ink-3)', padding:'10px', fontSize:'11.5px'} }, 'Cargando más…') ]);
     tb.parentNode.appendChild(sentinel); // outside tbody (browser tolerates)
     const io = new IntersectionObserver(entries => entries.forEach(en => { if (en.isIntersecting && rendered < current.length) renderMore(); }), { rootMargin: '120px' });
 
@@ -4504,6 +4510,7 @@ function rowForEquipo(e) {
     h('div', e.nombre || '—'),
     h('div', { style:{color:'var(--ink-3)', fontSize:'11.5px'} }, e.fam || ''),
   ]));
+  tr.appendChild(h('td.col-mono', e.carpeta != null && e.carpeta !== '' ? String(e.carpeta) : '—'));
   tr.appendChild(h('td.col-mono', e.inventario || '—'));
   tr.appendChild(h('td.col-mono', e.serie || '—'));
   tr.appendChild(h('td.truncate', { title:`${e.marca} ${e.modelo}` }, `${e.marca || ''} ${e.modelo ? '· ' + e.modelo : ''}`.trim() || '—'));
@@ -5112,8 +5119,8 @@ VIEWS.entregas = {
     root.appendChild(viewHeader({
       title: 'Entregas',
       desc: meta
-        ? `${periodoLabel(periodo)} · cargado ${fmt.rel(meta.fechaCarga)} · ${meta.matcheados} de ${meta.total} equipos asignados${meta.sinMatch?.length ? ' · '+meta.sinMatch.length+' sin match' : ''}`
-        : `${periodoLabel(periodo)} · sin asignación cargada todavía`,
+        ? `${periodoLabel(periodo)} · archivo ${meta.archivo} cargado ${fmt.rel(meta.fechaCarga)} · ${meta.matcheados} de ${meta.total} equipos${meta.sinMatch?.length ? ' · '+meta.sinMatch.length+' sin match' : ''}`
+        : `${periodoLabel(periodo)} · sin archivo mensual — usando "Responsable MP" del maestro`,
       actions: [
         { label:'Importar asignación', icon:'ti-file-spreadsheet', onclick: () => handleImportAsignacion(periodo) },
         { label:'Exportar plantilla',  icon:'ti-download', onclick: async () => {
