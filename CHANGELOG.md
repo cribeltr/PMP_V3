@@ -1,5 +1,33 @@
 # Changelog
 
+## It.3 — Ciclo correctivo · gestión por eslabón
+
+- **Ciclo Viewer**: modal grande con stepper horizontal en el header y
+  formularios independientes por eslabón (Apertura · Diagnóstico ·
+  Compra | Garantía · Envío · Recepción · Reparación). Click en
+  cualquier eslabón completado lo reabre en modo edición retroactiva.
+- **Rutas A/B/C/D**: en Diagnóstico se elige ruta (interna · compra
+  primero · envío primero) y se marca o desmarca la opción de garantía
+  (intercambia Compra ↔ Garantía en el flujo).
+- **Avance automático**: al guardar un eslabón activo, el siguiente
+  modal se abre solo. Edición retroactiva guarda sin avanzar.
+- **Transiciones de estado**:
+  - Envío guardado → equipo a En Servicio Técnico con `estadoDesde =
+    fechaEvento` del envío.
+  - Recepción "no funcionó" → vuelve a Envío (loop, con evento en el
+    timeline).
+  - Reparación guardada → ciclo cerrado y equipo a Operativo.
+  - Compra rechazada / Garantía denegada → ciclo cerrado y equipo a
+    Fuera de Servicio.
+- **Borradores**: cada cambio en el form se autoguarda en
+  `ciclo.borradores[eslabon]` (debounce 800ms). Al volver al eslabón,
+  el form se rehidrata desde el borrador.
+- **Menú de acciones (···)**: cancelar ciclo (con confirmación),
+  reabrir ciclo cerrado. Para cambiar ruta o garantía basta con editar
+  el diagnóstico retroactivamente.
+- Vista **Ciclos** y pestaña Ciclos de la ficha: click en cualquier
+  fila/tarjeta abre directamente el viewer.
+
 ## It.2 — PMP, causales y vinculación al ciclo
 
 - Vista **PMP** con dos modos: por mes (lista filtrable de programadas/
