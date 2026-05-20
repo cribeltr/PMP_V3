@@ -2107,6 +2107,16 @@ async function importMaestroFile(file) {
   const merged = [];
   const seen = new Set();
 
+  // Diff acumulado
+  const diff = {
+    archivo: file.name,
+    sheet: sheetName,
+    fecha: new Date().toISOString(),
+    nuevos:   [],   // equipos en archivo que no existían
+    ausentes: [],   // equipos en estado que no aparecen en el archivo
+    cambios:  [],   // equipos cuyos datos cambiaron
+  };
+
   for (const r of rows) {
     const draft = rowToEquipo(r, idx);
     if (!draft.nombre && !draft.inventario && !draft.serie) continue;
@@ -2114,18 +2124,43 @@ async function importMaestroFile(file) {
     const prev = key ? previas.get(key) : null;
     if (prev) {
       seen.add(prev.uuid);
+      const antes = snapshotEquipoCampos(prev);
       mergeEquipoInPlace(prev, draft);
+      const despues = snapshotEquipoCampos(prev);
+      const cambios = computeEquipoChanges(antes, despues);
+      if (cambios.fields.length || cambios.grilla.length) {
+        diff.cambios.push({
+          uuid: prev.uuid,
+          nombre: prev.nombre, serie: prev.serie, inventario: prev.inventario, servicio: prev.servicio, fam: prev.fam,
+          ...cambios,
+        });
+      }
       merged.push(prev);
       result.actualizados++;
     } else {
       const nuevo = normalizeEquipoFromLegacy(draft);
       merged.push(nuevo);
       result.nuevos++;
+      diff.nuevos.push({
+        uuid: nuevo.uuid,
+        nombre: nuevo.nombre, serie: nuevo.serie, inventario: nuevo.inventario, servicio: nuevo.servicio, fam: nuevo.fam,
+      });
     }
   }
-  // Keep equipment that wasn't in the file (might be slots / out-of-master).
+  // Equipos que no estaban en el archivo: se mantienen, pero se reportan como ausentes
+  // (excepto los que ya están De Baja — esos son esperados).
   STATE.equipos.forEach(e => {
-    if (!seen.has(e.uuid) && !merged.includes(e)) { merged.push(e); result.mantenidos++; }
+    if (!seen.has(e.uuid) && !merged.includes(e)) {
+      merged.push(e);
+      result.mantenidos++;
+      if (e.estado !== 'DeBaja') {
+        diff.ausentes.push({
+          uuid: e.uuid,
+          nombre: e.nombre, serie: e.serie, inventario: e.inventario, servicio: e.servicio, fam: e.fam,
+          estado: e.estado, esSlot: !!e.esSlot,
+        });
+      }
+    }
   });
   STATE.equipos = merged;
   STATE.session = Object.assign({}, STATE.session, {
@@ -2135,7 +2170,50 @@ async function importMaestroFile(file) {
   });
   persist('equipos');
   persist('session');
+
+  // Totales del diff
+  diff.totales = {
+    nuevos:   diff.nuevos.length,
+    ausentes: diff.ausentes.length,
+    cambios:  diff.cambios.length,
+    camposCambiados: diff.cambios.reduce((s,c) => s + c.fields.length, 0),
+    grillaCambios:   diff.cambios.reduce((s,c) => s + c.grilla.length, 0),
+  };
+  result.diff = diff;
   return result;
+}
+
+const DIFF_CAMPOS = ['servicio','unidad','ubicacion','procedencia','marca','modelo','anio','vidaUtil',
+                     'clasificacion','enu','observacion','frecuencia','responsableMaster','fam','famOriginal','carpeta','nombre','id'];
+const DIFF_CAMPOS_LABEL = {
+  servicio:'Servicio', unidad:'Unidad', ubicacion:'Ubicación', procedencia:'Procedencia',
+  marca:'Marca', modelo:'Modelo', anio:'Año', vidaUtil:'Vida útil', clasificacion:'Clasificación',
+  enu:'ENU / baja', observacion:'Observación', frecuencia:'Frecuencia MP',
+  responsableMaster:'Responsable maestro', fam:'Familia', famOriginal:'Familia (original)',
+  carpeta:'Carpeta', nombre:'Nombre', id:'ID',
+};
+
+function snapshotEquipoCampos(e) {
+  const snap = {};
+  DIFF_CAMPOS.forEach(k => { snap[k] = e[k] ?? ''; });
+  snap.grilla = Object.assign({}, e.grilla || {});
+  return snap;
+}
+
+function computeEquipoChanges(antes, despues) {
+  const fields = [];
+  DIFF_CAMPOS.forEach(k => {
+    const a = String(antes[k] ?? '').trim();
+    const b = String(despues[k] ?? '').trim();
+    if (a !== b) fields.push({ campo: k, label: DIFF_CAMPOS_LABEL[k] || k, antes: a, despues: b });
+  });
+  const grilla = [];
+  for (let m = 1; m <= 12; m++) {
+    const a = antes.grilla?.[m] || null;
+    const b = despues.grilla?.[m] || null;
+    if (a !== b) grilla.push({ mes: m, antes: a, despues: b });
+  }
+  return { fields, grilla };
 }
 
 function matchKey(e) {
@@ -2807,6 +2885,189 @@ function agruparPorTecnico(periodo) {
     groups.get(resp).push(e);
   });
   return groups;
+}
+
+/* ============================================================
+   IMPORT MAESTRO · modal de diferencias + pendiente
+   ============================================================ */
+function diffTieneCambios(diff) {
+  return (diff.nuevos.length + diff.ausentes.length + diff.cambios.length) > 0;
+}
+
+function abrirModalDiferenciasMaestro(diff, opts={}) {
+  const review = !!opts.review;
+  const pendienteId = opts.pendienteId || null;
+
+  UI.modal({
+    title: review ? 'Diferencias por revisar' : 'Diferencias detectadas en el maestro',
+    sub: `${diff.archivo} · ${fmt.datetime(diff.fecha)}`,
+    size: 'lg',
+    content: (body, { close }) => {
+      const t = diff.totales || { nuevos: diff.nuevos.length, ausentes: diff.ausentes.length, cambios: diff.cambios.length };
+
+      // Resumen
+      body.appendChild(h('div.kpi-grid', { style:{marginBottom:'14px'} }, [
+        kpiCard({ label: 'Equipos nuevos',   value: fmt.number(t.nuevos),   kind: t.nuevos ? 'info' : 'muted' }),
+        kpiCard({ label: 'Ausentes',         value: fmt.number(t.ausentes), kind: t.ausentes ? 'warning' : 'muted' }),
+        kpiCard({ label: 'Con cambios',      value: fmt.number(t.cambios),  kind: t.cambios ? 'warning' : 'muted' }),
+        kpiCard({ label: 'Cambios en grilla', value: fmt.number(t.grillaCambios || 0) }),
+      ]));
+
+      if (!diffTieneCambios(diff)) {
+        body.appendChild(h('div.banner.info', [
+          h('i.ti.ti-circle-check'),
+          h('div.grow', 'No se detectaron diferencias respecto del estado actual.'),
+        ]));
+        return;
+      }
+
+      // Tabs
+      const tabs = h('div.tabs', { style:{padding:0, marginBottom:'12px'} });
+      const panel = h('div');
+      const sections = [
+        { id:'nuevos',   label:'Nuevos',   count: t.nuevos,   render: () => panelNuevos(diff) },
+        { id:'ausentes', label:'Ausentes', count: t.ausentes, render: () => panelAusentes(diff) },
+        { id:'cambios',  label:'Datos',    count: diff.cambios.filter(c => c.fields.length).length, render: () => panelCambios(diff) },
+        { id:'grilla',   label:'Grilla',   count: diff.cambios.filter(c => c.grilla.length).length, render: () => panelGrilla(diff) },
+      ];
+      const first = sections.find(s => s.count > 0) || sections[0];
+      sections.forEach(s => {
+        const tab = h('div.tab', [ s.label, h('span.count', s.count) ]);
+        if (s.id === first.id) tab.classList.add('active');
+        tab.addEventListener('click', () => {
+          $$('.tab', tabs).forEach(x => x.classList.remove('active'));
+          tab.classList.add('active');
+          panel.innerHTML = '';
+          panel.appendChild(s.render());
+        });
+        tabs.appendChild(tab);
+      });
+      body.appendChild(tabs);
+      body.appendChild(panel);
+      panel.appendChild(first.render());
+    },
+    footer: (f, { close }) => {
+      f.appendChild(h('button.btn.ghost', { onclick: close }, review ? 'Cerrar' : 'Cerrar sin guardar pendiente'));
+      if (review && pendienteId) {
+        f.appendChild(h('button.btn.primary', { onclick: async () => {
+          const ok = await UI.dialog({ title:'Cerrar pendiente', message: '¿Marcar este pendiente como revisado y cerrarlo?', confirmText:'Cerrar pendiente' });
+          if (!ok) return;
+          PENDIENTE.cerrar(pendienteId, 'Diferencias revisadas');
+          UI.toast('Pendiente cerrado.', 'success');
+          close();
+          if (STATE.view === 'tareas') Router.go('tareas');
+        }}, [ h('i.ti.ti-check'), 'Marcar revisado' ]));
+      } else if (!review && diffTieneCambios(diff)) {
+        f.appendChild(h('button.btn.primary', { onclick: () => {
+          const p = crearPendienteDiferencias(diff);
+          UI.toast(`Pendiente creado · vence ${fmt.date(p.vence)}.`, 'success', { duration: 5000 });
+          close();
+        }}, [ h('i.ti.ti-clipboard-plus'), 'Crear pendiente para revisar' ]));
+      }
+    },
+  });
+}
+
+function panelNuevos(diff) {
+  if (!diff.nuevos.length) return h('div', { style:{padding:'20px', color:'var(--ink-3)', fontSize:'12.5px', textAlign:'center'} }, 'Sin equipos nuevos en este maestro.');
+  const tbl = h('table.dt');
+  tbl.innerHTML = `<thead><tr><th>Servicio</th><th>Familia</th><th>Equipo</th><th>Serie</th><th>Inventario</th></tr></thead>`;
+  const tb = h('tbody');
+  diff.nuevos.forEach(r => {
+    tb.appendChild(h('tr', { onclick: () => openFicha(r.uuid) }, [
+      h('td.truncate', r.servicio || '—'),
+      h('td.truncate', r.fam || '—'),
+      h('td', r.nombre || '—'),
+      h('td.col-mono', r.serie || '—'),
+      h('td.col-mono', r.inventario || '—'),
+    ]));
+  });
+  tbl.appendChild(tb);
+  return h('div.table-wrap', [ tbl ]);
+}
+
+function panelAusentes(diff) {
+  if (!diff.ausentes.length) return h('div', { style:{padding:'20px', color:'var(--ink-3)', fontSize:'12.5px', textAlign:'center'} }, 'Todos los equipos del estado actual están presentes en el maestro.');
+  const tbl = h('table.dt');
+  tbl.innerHTML = `<thead><tr><th>Servicio</th><th>Equipo</th><th>Serie</th><th>Inventario</th><th>Estado</th></tr></thead>`;
+  const tb = h('tbody');
+  diff.ausentes.forEach(r => {
+    tb.appendChild(h('tr', { onclick: () => openFicha(r.uuid) }, [
+      h('td.truncate', r.servicio || '—'),
+      h('td', [ r.nombre || '—', r.esSlot ? h('span.pill.muted', { style:{marginLeft:'6px'} }, 'slot') : null ]),
+      h('td.col-mono', r.serie || '—'),
+      h('td.col-mono', r.inventario || '—'),
+      h('td', h(`span.pill.${ESTADO_PILL[r.estado]||''}`.trim(), ESTADO_LABEL[r.estado] || r.estado || '—')),
+    ]));
+  });
+  tbl.appendChild(tb);
+  return h('div.table-wrap', [ tbl ]);
+}
+
+function panelCambios(diff) {
+  const conCampos = diff.cambios.filter(c => c.fields.length);
+  if (!conCampos.length) return h('div', { style:{padding:'20px', color:'var(--ink-3)', fontSize:'12.5px', textAlign:'center'} }, 'Sin cambios en datos planos.');
+  const wrap = h('div');
+  conCampos.forEach(c => {
+    const card = h('div.card', { style:{marginBottom:'8px', cursor:'pointer'}, onclick: () => openFicha(c.uuid) }, [
+      h('div', { style:{fontWeight:500, fontSize:'13px', marginBottom:'4px'} }, c.nombre || '(sin nombre)'),
+      h('div', { style:{fontSize:'11.5px', color:'var(--ink-3)', marginBottom:'8px'} }, [
+        `${c.servicio || ''}`, c.serie ? ` · S/N ${c.serie}` : '', c.inventario ? ` · Inv ${c.inventario}` : '',
+      ].join('')),
+    ]);
+    const tbl = h('table.dt');
+    tbl.innerHTML = `<thead><tr><th>Campo</th><th>Antes</th><th>Después</th></tr></thead>`;
+    const tb = h('tbody');
+    c.fields.forEach(f => {
+      tb.appendChild(h('tr', [
+        h('td', f.label || f.campo),
+        h('td', { style:{color:'var(--ink-3)'} }, f.antes || '—'),
+        h('td', { style:{color:'var(--success)'} }, f.despues || '—'),
+      ]));
+    });
+    tbl.appendChild(tb);
+    card.appendChild(tbl);
+    wrap.appendChild(card);
+  });
+  return wrap;
+}
+
+function panelGrilla(diff) {
+  const conGrilla = diff.cambios.filter(c => c.grilla.length);
+  if (!conGrilla.length) return h('div', { style:{padding:'20px', color:'var(--ink-3)', fontSize:'12.5px', textAlign:'center'} }, 'Sin cambios en grillas.');
+  const tbl = h('table.dt');
+  tbl.innerHTML = `<thead><tr><th>Equipo</th><th>Serie</th><th>Cambios</th></tr></thead>`;
+  const tb = h('tbody');
+  conGrilla.forEach(c => {
+    const cells = h('td', c.grilla.map(g => h('span.pill', { style:{marginRight:'4px', marginBottom:'2px'} },
+      `${MESES[g.mes-1]}: ${g.antes || '∅'} → ${g.despues || '∅'}`
+    )));
+    tb.appendChild(h('tr', { onclick: () => openFicha(c.uuid) }, [
+      h('td', c.nombre || '—'),
+      h('td.col-mono', c.serie || '—'),
+      cells,
+    ]));
+  });
+  tbl.appendChild(tb);
+  return h('div.table-wrap', [ tbl ]);
+}
+
+function crearPendienteDiferencias(diff) {
+  const t = diff.totales;
+  const partes = [];
+  if (t.nuevos)   partes.push(`${t.nuevos} nuevos`);
+  if (t.ausentes) partes.push(`${t.ausentes} ausentes`);
+  if (t.cambios)  partes.push(`${t.cambios} con cambios`);
+  const desc = `Revisar diferencias del maestro ${diff.archivo} (${partes.join(' · ') || 'sin cambios significativos'})`;
+  const vence = addBusinessDays(new Date(), 2).toISOString();
+  const p = PENDIENTE.crear({
+    tipo: 'diferencias-maestro',
+    descripcion: desc,
+    asignado: '',
+    vence,
+    meta: { diff },
+  });
+  return p;
 }
 
 /** Merge updates from master file without destroying historial / correctivos / eventos / R-marks. */
@@ -5075,10 +5336,11 @@ VIEWS.tareas = {
       items.forEach(p => {
         const e = p.equipoUuid ? EQ.byUuid(p.equipoUuid) : null;
         const vencido = p.vence && new Date(p.vence) < new Date();
-        sec.appendChild(h('div.card', { style:{marginBottom:'8px'} }, [
+        const esDiff = p.tipo === 'diferencias-maestro' && p.meta?.diff;
+        const cardChildren = [
           h('div.card-h', [
             h('h3', p.descripcion || '(sin descripción)'),
-            p.tipo ? h('span.pill', p.tipo) : null,
+            p.tipo ? h('span.pill' + (esDiff?'.info':''), p.tipo) : null,
             vencido && p.estado !== 'Cerrado' ? h('span.pill.danger', `vencido hace ${fmt.daysSince(p.vence)}d`) : null,
             p.estado === 'Cerrado' ? h('span.pill.success','cerrado') : null,
           ]),
@@ -5088,15 +5350,30 @@ VIEWS.tareas = {
             p.vence ? ` · vence ${fmt.date(p.vence)}` : '',
             ` · creado ${fmt.rel(p.creado)}`,
           ]),
-          withClose && p.estado !== 'Cerrado' ? h('div', { style:{marginTop:'10px', display:'flex', gap:'8px'} }, [
-            h('button.btn.sm', { onclick: async () => {
-              const ok = await UI.dialog({ title:'Cerrar pendiente', message: '¿Cerrar este pendiente?', confirmText:'Cerrar' });
-              if (!ok) return;
-              PENDIENTE.cerrar(p.id);
-              Router.go('tareas');
-            }}, [ h('i.ti.ti-check'), 'Cerrar' ]),
-          ]) : null,
-        ]));
+        ];
+        if (esDiff) {
+          const t = p.meta.diff.totales || {};
+          cardChildren.push(h('div', { style:{display:'flex', gap:'6px', marginTop:'8px', flexWrap:'wrap', fontSize:'11.5px'} }, [
+            t.nuevos   ? h('span.pill.info',    `${t.nuevos} nuevos`)   : null,
+            t.ausentes ? h('span.pill.warning', `${t.ausentes} ausentes`) : null,
+            t.cambios  ? h('span.pill.warning', `${t.cambios} con cambios`) : null,
+            t.grillaCambios ? h('span.pill', `${t.grillaCambios} cambios de grilla`) : null,
+          ]));
+        }
+        const acts = [];
+        if (esDiff) {
+          acts.push(h('button.btn.sm', { onclick: () => abrirModalDiferenciasMaestro(p.meta.diff, { review: true, pendienteId: p.id }) }, [ h('i.ti.ti-eye'), 'Revisar diferencias' ]));
+        }
+        if (withClose && p.estado !== 'Cerrado') {
+          acts.push(h('button.btn.sm', { onclick: async () => {
+            const ok = await UI.dialog({ title:'Cerrar pendiente', message: '¿Cerrar este pendiente?', confirmText:'Cerrar' });
+            if (!ok) return;
+            PENDIENTE.cerrar(p.id);
+            Router.go('tareas');
+          }}, [ h('i.ti.ti-check'), 'Cerrar' ]));
+        }
+        if (acts.length) cardChildren.push(h('div', { style:{marginTop:'10px', display:'flex', gap:'8px'} }, acts));
+        sec.appendChild(h('div.card', { style:{marginBottom:'8px'} }, cardChildren));
       });
       return sec;
     }
@@ -5535,6 +5812,10 @@ async function handleImportMaestro() {
     UI.toast(`Hoja "${result.sheet}": ${result.nuevos} nuevos · ${result.actualizados} actualizados · ${result.mantenidos} preservados.`, 'success', { duration: 6000 });
     Router.go(STATE.view);
     renderSessionChip();
+    // Si hay diferencias, ofrecer crear pendiente para revisar
+    if (result.diff && diffTieneCambios(result.diff)) {
+      abrirModalDiferenciasMaestro(result.diff);
+    }
   } catch (e) { bus.emit('error', e); }
 }
 

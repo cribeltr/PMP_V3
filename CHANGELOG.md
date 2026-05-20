@@ -1,5 +1,22 @@
 # Changelog
 
+## It.7.1 — Diferencias del maestro como pendiente
+
+- Al importar el maestro, el sistema captura un **diff completo**
+  contra el estado actual: equipos nuevos, equipos ausentes, cambios
+  en datos (servicio, ubicación, marca, frecuencia, responsable, etc.)
+  y cambios en grilla (mes a mes).
+- Modal "Diferencias detectadas" con 4 pestañas (Nuevos · Ausentes ·
+  Datos · Grilla) y KPIs de resumen. Cada fila enlaza a la ficha del
+  equipo.
+- Botón **"Crear pendiente para revisar"** guarda el diff en un
+  pendiente tipo `diferencias-maestro` con vencimiento de 2 días
+  hábiles.
+- En Tareas, los pendientes de diferencias muestran las pills con
+  contadores (nuevos · ausentes · cambios · grilla) y un botón
+  **"Revisar diferencias"** que re-abre el modal en modo revisión,
+  permitiendo marcar el pendiente como cerrado al terminar.
+
 ## It.7 — Pulido final · Fase 1 lista para uso
 
 - Dashboard rediseñado: KPI `MP cumplimiento %` (semáforo), KPI de
