@@ -1,5 +1,43 @@
 # Changelog
 
+## It.2 — PMP, causales y vinculación al ciclo
+
+- Vista **PMP** con dos modos: por mes (lista filtrable de programadas/
+  ejecutadas/causalizadas) y vista anual de 12 meses (grilla compacta).
+  KPIs de cumplimiento del mes en pie de vista.
+- Modal **Registrar MP** con fecha real del evento (registro retroactivo
+  válido), mes computable, resultado (SI / NO / FS / BAJA / C1–C8),
+  estado final si SI, tipo de baja si BAJA, ejecutor con datalist y
+  observación. Edición retroactiva pide motivo cuando cambia el ejecutor.
+- Causales:
+  - **C2** abre modal de vinculación con dos opciones (envío existente
+    de un ciclo abierto o crear ciclo con envío ya hecho que arranca
+    directo en Recepción). Al confirmar, equipo pasa a En Servicio
+    Técnico con `estadoDesde = fechaEvento`.
+  - **C3** abre modal con tres opciones (ciclo existente, ciclo con
+    folio SIGEM, o crear pendiente "Solicitar a servicio clínico" con
+    vencimiento en días hábiles). Al confirmar, equipo pasa a No
+    Operativo con la fecha real.
+  - Si cancelás el modal, la causal queda registrada pero el equipo NO
+    cambia de estado; aparece banner amarillo en la ficha del equipo
+    con acción "Vincular ahora".
+- Apertura de **ciclo correctivo** desde la ficha: fecha real,
+  detección, descripción, responsable y estado del folio SIGEM (existe
+  / falta gestionar / no aplica). Si falta, se crea pendiente
+  automático con vencimiento 3 días hábiles.
+- Alertas en la ficha: causal Grupo A sin resolver > 30 días, causal
+  C2/C3 sin vincular, ciclo abierto sin folio SIGEM.
+- Vista **Ciclos correctivos**: listado de ciclos abiertos con
+  eslabón, fecha de apertura, folio SIGEM y días transcurridos (la UI
+  completa por eslabón llega en It.3).
+- Vista **Tareas**: pendientes administrativos con creación manual,
+  cierre con confirmación, marcadores de vencimiento.
+- Fechas duales (`fechaEvento` vs `fechaRegistro`) implementadas en
+  MP, eventos y apertura de ciclos.
+- Ficha 360°: pestaña Grilla con celdas clickeables (cambiar marcador
+  o registrar MP); pestaña Historial con filas clickeables para
+  edición retroactiva.
+
 ## It.1.1 — Tema oscuro
 
 - Modo oscuro como tema por defecto (paper-dark `#17161b`, surfaces
