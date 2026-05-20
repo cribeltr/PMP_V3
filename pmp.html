@@ -915,11 +915,12 @@ const SCHEMA_VERSION = 1;
 const MESES = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
 const MESES_NUM = [1,2,3,4,5,6,7,8,9,10,11,12];
 
-const ESTADOS = ['Operativo','NoOperativo','ServicioTecnico','FueraDeServicio','DeBaja','Slot'];
+const ESTADOS = ['Operativo','NoOperativo','ServicioTecnico','Recepcionado','FueraDeServicio','DeBaja','Slot'];
 const ESTADO_LABEL = {
   Operativo: 'Operativo',
   NoOperativo: 'No operativo',
   ServicioTecnico: 'En servicio técnico',
+  Recepcionado: 'Equipo Recepcionado',
   FueraDeServicio: 'Fuera de servicio',
   DeBaja: 'De baja',
   Slot: 'Slot disponible',
@@ -928,10 +929,12 @@ const ESTADO_PILL = {
   Operativo: 'success',
   NoOperativo: 'danger',
   ServicioTecnico: 'warning',
+  Recepcionado: 'info',
   FueraDeServicio: 'muted',
   DeBaja: 'muted',
   Slot: 'muted',
 };
+const ESTADOS_NO_OPERATIVOS = ['NoOperativo','ServicioTecnico','Recepcionado'];
 
 const FRECUENCIAS = ['Mensual','Trimestral','Semestral','Anual'];
 
@@ -1512,282 +1515,282 @@ const MP = {
   },
 };
 
+/**
+ * Modelo de Ciclo Correctivo (R6 v34).
+ * Eventos independientes pero relacionados: una solicitud, N envíos, N
+ * recepciones (cada una vinculada a un envío) y una reparación que cierra.
+ * El flag `enGarantia` queda como información del equipo, no del ciclo.
+ */
 const CICLO = {
-  /**
-   * Crea un ciclo correctivo.
-   * @param spec {
-   *   fechaEvento, deteccion, descripcion, responsable,
-   *   sigemEstado: 'existe'|'falta'|'noAplica', folioSigem,
-   *   startEslabon: 'diagnostico'|'recepcion'  // recepcion = atajo C2 (envío ya hecho)
-   *   ruta?: string,
-   *   envio?: { folioEnvio, empresa, fecha, responsable } // sólo si startEslabon = recepcion
-   *   causalLink?: { mpId, causal }    // referencia al registro de causal que originó
-   * }
-   */
-  crear(equipoUuid, spec) {
-    const e = EQ.byUuid(equipoUuid);
-    if (!e) throw new Error('Equipo no encontrado.');
-    if (!spec.fechaEvento) throw new Error('Falta la fecha real del problema.');
-
-    const c = {
+  /** Helper interno: crea estructura vacía de ciclo. */
+  _nuevo(equipo) {
+    return {
       uuid: uuid(),
       abierto: true,
-      eslabonActual: spec.startEslabon || 'diagnostico',
-      ruta: spec.ruta || null,
-      enGarantia: !!e.enGarantia,
-      apertura: {
-        fechaEvento: spec.fechaEvento,
-        fechaRegistro: new Date().toISOString(),
-        deteccion: spec.deteccion || 'Servicio clínico avisó',
-        descripcion: spec.descripcion || '',
-        responsable: spec.responsable || '',
-        sigemEstado: spec.sigemEstado || 'falta',   // 'existe' | 'falta' | 'noAplica'
-        folioSigem: spec.folioSigem || '',
-        pendienteSigemId: null,
-      },
-      diagnostico: null,
-      compra: null,
-      garantia: null,
-      envio: spec.envio ? {
-        fechaEvento: spec.envio.fecha,
-        fechaRegistro: new Date().toISOString(),
-        folioEnvio: spec.envio.folioEnvio || '',
-        empresa: spec.envio.empresa || '',
-        responsable: spec.envio.responsable || '',
-      } : null,
-      recepcion: null,
+      enGarantia: !!equipo.enGarantia,
+      solicitud: null,
+      envios: [],
+      recepciones: [],
       reparacion: null,
       eventos: [],
-      borradores: {},
+      creado: new Date().toISOString(),
+      cerrado: null,
+      __migradoV34: true,
+    };
+  },
+
+  /** Lista equipos con ciclos abiertos. Helper compatible con código existente. */
+  todosAbiertos() {
+    const out = [];
+    STATE.equipos.forEach(e => (e.correctivos || []).forEach(c => { if (c.abierto) out.push({ equipo: e, ciclo: c }); }));
+    return out;
+  },
+
+  /**
+   * Registra una solicitud de trabajo nueva. Arranca ciclo correctivo.
+   * Cambia estado del equipo a NoOperativo.
+   * Genera pendiente automático "Avanzar ciclo correctivo".
+   * @param spec { fechaEvento, folioSigem, responsable, observaciones }
+   */
+  crearSolicitud(equipoUuid, spec) {
+    const e = EQ.byUuid(equipoUuid);
+    if (!e) throw new Error('Equipo no encontrado.');
+    if (!spec.fechaEvento) throw new Error('Falta la fecha real de la solicitud.');
+    if (!spec.folioSigem || !spec.folioSigem.trim()) throw new Error('El folio SIGEM es obligatorio.');
+    if (!spec.responsable || !spec.responsable.trim()) throw new Error('Elegí un responsable de la lista oficial.');
+
+    const c = this._nuevo(e);
+    c.solicitud = {
+      fechaEvento: spec.fechaEvento,
+      fechaRegistro: new Date().toISOString(),
+      folioSigem: spec.folioSigem.trim(),
+      responsable: spec.responsable,
+      observaciones: spec.observaciones || '',
     };
     e.correctivos = e.correctivos || [];
     e.correctivos.push(c);
-
-    // Estado: si arranca en diagnóstico ⇒ NoOperativo; si arranca en recepción ⇒ ServicioTecnico (atajo C2)
-    if (c.eslabonActual === 'recepcion') {
-      e.estado = 'ServicioTecnico';
-    } else {
-      e.estado = 'NoOperativo';
-    }
+    e.estado = 'NoOperativo';
     e.estadoDesde = spec.fechaEvento;
 
     pushEvento(e, {
-      tipo: 'APERTURA-CICLO',
+      tipo: 'SOLICITUD_TRABAJO',
       ts: spec.fechaEvento,
       payload: {
         cicloUuid: c.uuid,
-        descripcion: spec.descripcion,
-        deteccion: spec.deteccion,
-        sigemEstado: spec.sigemEstado,
-        folioSigem: spec.folioSigem,
-        startEslabon: c.eslabonActual,
-        causalLink: spec.causalLink || null,
+        folioSigem: c.solicitud.folioSigem,
+        responsable: c.solicitud.responsable,
+        descripcion: spec.observaciones || '',
+        desc: `Solicitud de trabajo · Folio ${c.solicitud.folioSigem}: ${spec.observaciones || '(sin observaciones)'}`,
       },
     });
+    pushEvento(e, {
+      tipo: 'ESTADO',
+      ts: spec.fechaEvento,
+      payload: { de: e.estado === 'NoOperativo' ? '?' : e.estado, a: 'NoOperativo', origen: 'SOLICITUD_TRABAJO' },
+    });
 
-    // Pendiente automático si falta gestionar SIGEM
-    if ((spec.sigemEstado === 'falta') && !spec.folioSigem) {
-      const vence = addBusinessDays(new Date(), 3).toISOString();
-      const p = PENDIENTE.crear({
-        tipo: 'sigem',
-        descripcion: `Solicitar folio SIGEM al servicio clínico (${e.nombre || 'equipo'})`,
-        equipoUuid: e.uuid,
-        asignado: spec.responsable || '',
-        vence,
-        meta: { cicloUuid: c.uuid },
-      });
-      c.apertura.pendienteSigemId = p.id;
-    }
+    // Pendiente automático: avanzar ciclo correctivo
+    const vence = addBusinessDays(new Date(), 5).toISOString();
+    const p = PENDIENTE.crear({
+      tipo: 'ciclo-correctivo',
+      descripcion: `Avanzar ciclo correctivo del equipo ${e.nombre || ''} (folio ${c.solicitud.folioSigem})`,
+      equipoUuid: e.uuid,
+      asignado: c.solicitud.responsable,
+      vence,
+      meta: { cicloUuid: c.uuid, tipoAlerta: 'solicitud-abierta' },
+    });
 
     persist('equipos');
-    return { equipo: e, ciclo: c };
+    return { equipo: e, ciclo: c, pendiente: p };
   },
 
-  /** Vincula un envío pre-existente a un ciclo en curso (C2 → ciclo abierto). */
-  vincularEnvio(equipoUuid, cicloUuid, envio) {
+  /**
+   * Agrega un envío. Si `cicloUuid` es null, crea un ciclo nuevo (envío sin
+   * solicitud previa). Si está dado, agrega a `c.envios[]`.
+   * Cambia estado del equipo a ServicioTecnico.
+   */
+  agregarEnvio(equipoUuid, cicloUuid, spec) {
     const e = EQ.byUuid(equipoUuid);
     if (!e) throw new Error('Equipo no encontrado.');
-    const c = (e.correctivos || []).find(x => x.uuid === cicloUuid);
-    if (!c) throw new Error('Ciclo no encontrado.');
-    c.envio = {
-      fechaEvento: envio.fecha,
-      fechaRegistro: new Date().toISOString(),
-      folioEnvio: envio.folioEnvio || '',
-      empresa: envio.empresa || '',
-      responsable: envio.responsable || '',
-    };
-    if (c.eslabonActual === 'diagnostico' || c.eslabonActual === 'compra' || c.eslabonActual === 'garantia') {
-      c.eslabonActual = 'recepcion';
-    }
-    e.estado = 'ServicioTecnico';
-    e.estadoDesde = envio.fecha;
-    pushEvento(e, { tipo: 'ENVIO', ts: envio.fecha, payload: { cicloUuid: c.uuid, ...envio } });
-    persist('equipos');
-    return { equipo: e, ciclo: c };
-  },
+    if (!spec.fechaEvento) throw new Error('Falta la fecha del envío.');
+    if (!spec.numeroEnvio || !String(spec.numeroEnvio).trim()) throw new Error('El número de envío es obligatorio.');
+    if (!spec.empresaST || !spec.empresaST.trim()) throw new Error('La empresa de servicio técnico es obligatoria.');
+    if (!spec.responsable || !spec.responsable.trim()) throw new Error('Elegí un responsable de la lista oficial.');
 
-  // ===== Eslabones / rutas =====
-
-  eslabones(c) {
-    const order = ESLABONES_ORDEN[c.ruta] || ['apertura','diagnostico','?','?','?','reparacion'];
-    return order.map(es => es === 'compra' && c.enGarantia ? 'garantia' : es);
-  },
-
-  nextEslabon(c, current) {
-    const list = this.eslabones(c);
-    const idx = list.indexOf(current);
-    if (idx < 0) return null;
-    if (idx === list.length - 1) return null;
-    const next = list[idx+1];
-    return next === '?' ? null : next;
-  },
-
-  /** Guarda datos de un eslabón. Si advance=true y es el activo, aplica transiciones y avanza. */
-  saveEslabon(equipoUuid, cicloUuid, eslabon, data, { advance = true } = {}) {
-    const e = EQ.byUuid(equipoUuid);
-    if (!e) throw new Error('Equipo no encontrado.');
-    const c = (e.correctivos || []).find(x => x.uuid === cicloUuid);
-    if (!c) throw new Error('Ciclo no encontrado.');
-
-    const allowed = {
-      apertura:    ['fechaEvento','deteccion','descripcion','responsable','sigemEstado','folioSigem'],
-      diagnostico: ['fechaEvento','obs','ruta','enGarantia'],
-      compra:      ['fechaEvento','estado','empresa','folioOC','monto'],
-      garantia:    ['fechaEvento','estado','proveedor','nroCaso','fechaEstimada','notas'],
-      envio:       ['fechaEvento','folioEnvio','empresa','responsable'],
-      recepcion:   ['fechaEvento','funciono','obs'],
-      reparacion:  ['fechaEvento','obs'],
-    }[eslabon];
-    if (!allowed) throw new Error('Eslabón inválido: ' + eslabon);
-    if (!data.fechaEvento) throw new Error('Falta fecha del evento.');
-
-    const payload = { fechaRegistro: new Date().toISOString() };
-    allowed.forEach(k => { if (data[k] !== undefined) payload[k] = data[k]; });
-
-    // Diagnóstico fija ruta y garantía a nivel ciclo.
-    if (eslabon === 'diagnostico') {
-      if (data.ruta) c.ruta = data.ruta;
-      if (data.enGarantia !== undefined) c.enGarantia = !!data.enGarantia;
-    }
-
-    const previo = c[eslabon] ? Object.assign({}, c[eslabon]) : null;
-    c[eslabon] = Object.assign({}, c[eslabon] || {}, payload);
-
-    // Limpiar borrador del eslabón
-    if (c.borradores && c.borradores[eslabon]) delete c.borradores[eslabon];
-
-    const esRetroactivo = !advance || c.eslabonActual !== eslabon;
-    const tipoEvento = 'CICLO-' + eslabon.toUpperCase();
-
-    if (esRetroactivo && previo) {
-      // Reescribir timestamps de los eventos asociados (mismo tipo + mismo ciclo).
-      const fechaPrev = previo.fechaEvento;
-      (e.eventos || []).forEach(ev => {
-        if (ev.tipo === tipoEvento && ev.payload && ev.payload.cicloUuid === c.uuid) {
-          // Si el evento referenciaba la fecha previa, actualizamos.
-          if (!fechaPrev || ev.ts === fechaPrev) {
-            ev.ts = data.fechaEvento;
-            ev.payload = Object.assign({}, ev.payload, { fechaEvento: data.fechaEvento, fechaRegistroEdicion: new Date().toISOString() });
-          }
-        }
-      });
-      // Evento marcador de la edición.
-      pushEvento(e, {
-        tipo: 'EDICION_RETROACTIVA',
-        ts: new Date().toISOString(),     // este es administrativo: now() está permitido
-        payload: { cicloUuid: c.uuid, eslabon, fechaPrev, fechaNueva: data.fechaEvento },
-      });
-      // Recalcular estadoDesde desde el evento más reciente que cambia el estado.
-      const cambiosEstado = (e.eventos || []).filter(ev => {
-        const t = ev.tipo;
-        if (t === 'EDICION_RETROACTIVA') return false;
-        if (ev.payload?.cicloUuid === c.uuid && ['CICLO-APERTURA','CICLO-ENVIO','CICLO-CIERRE','CICLO-LOOP'].includes(t)) return true;
-        if (t === 'MP' && ['SI','FS','BAJA'].includes(ev.payload?.resultado)) return true;
-        if (t === 'APERTURA-CICLO' || t === 'CAUSAL-PENDIENTE-CLINICO' || t === 'CAUSAL-VINCULADA') return true;
-        return false;
-      });
-      if (cambiosEstado.length) {
-        cambiosEstado.sort((a,b) => new Date(b.ts) - new Date(a.ts));
-        e.estadoDesde = cambiosEstado[0].ts;
-      }
+    let c;
+    if (cicloUuid) {
+      c = (e.correctivos || []).find(x => x.uuid === cicloUuid);
+      if (!c) throw new Error('Ciclo no encontrado.');
+      if (!c.abierto) throw new Error('No se puede agregar envío a un ciclo cerrado.');
     } else {
-      // Avance normal: registramos el evento del eslabón.
-      pushEvento(e, {
-        tipo: tipoEvento,
-        ts: data.fechaEvento,
-        payload: Object.assign({ cicloUuid: c.uuid }, payload),
-      });
+      c = this._nuevo(e);
+      e.correctivos = e.correctivos || [];
+      e.correctivos.push(c);
     }
+    const env = {
+      uuid: uuid(),
+      fechaEvento: spec.fechaEvento,
+      fechaRegistro: new Date().toISOString(),
+      numeroEnvio: String(spec.numeroEnvio).trim(),
+      empresaST: spec.empresaST.trim(),
+      responsable: spec.responsable,
+      observaciones: spec.observaciones || '',
+      recepcionUuid: null,
+      cerrado: false,
+    };
+    c.envios.push(env);
+    e.estado = 'ServicioTecnico';
+    e.estadoDesde = spec.fechaEvento;
 
-    let nextEslabon = null;
-    let closed = false;
-
-    if (advance && c.eslabonActual === eslabon) {
-      switch (eslabon) {
-        case 'apertura':
-        case 'diagnostico':
-          nextEslabon = this.nextEslabon(c, eslabon);
-          if (nextEslabon) c.eslabonActual = nextEslabon;
-          break;
-        case 'compra':
-        case 'garantia': {
-          const est = (data.estado || '').toLowerCase();
-          if (est === 'rechazada' || est === 'denegada') {
-            c.abierto = false;
-            c.cerradoEn = new Date().toISOString();
-            c.cerradoMotivo = (eslabon === 'compra' ? 'Compra rechazada' : 'Garantía denegada');
-            e.estado = 'FueraDeServicio';
-            e.estadoDesde = data.fechaEvento;
-            closed = true;
-            pushEvento(e, { tipo: 'CICLO-CIERRE', ts: data.fechaEvento, payload: { motivo: c.cerradoMotivo, cicloUuid: c.uuid } });
-          } else {
-            nextEslabon = this.nextEslabon(c, eslabon);
-            if (nextEslabon) c.eslabonActual = nextEslabon;
-          }
-          break;
-        }
-        case 'envio':
-          e.estado = 'ServicioTecnico';
-          e.estadoDesde = data.fechaEvento;
-          nextEslabon = this.nextEslabon(c, eslabon);
-          if (nextEslabon) c.eslabonActual = nextEslabon;
-          break;
-        case 'recepcion':
-          if (data.funciono === false || data.funciono === 'no') {
-            // Loop: nuevo envío necesario
-            c.eslabonActual = 'envio';
-            nextEslabon = 'envio';
-            pushEvento(e, { tipo: 'CICLO-LOOP', ts: data.fechaEvento, payload: { cicloUuid: c.uuid, motivo: 'recepción no funcionó' } });
-            // Equipo sigue en ServicioTecnico hasta nuevo envío real.
-          } else {
-            nextEslabon = this.nextEslabon(c, eslabon);
-            if (nextEslabon) c.eslabonActual = nextEslabon;
-          }
-          break;
-        case 'reparacion':
-          c.abierto = false;
-          c.cerradoEn = new Date().toISOString();
-          c.cerradoMotivo = 'Reparación finalizada';
-          e.estado = 'Operativo';
-          e.estadoDesde = data.fechaEvento;
-          closed = true;
-          pushEvento(e, { tipo: 'CICLO-CIERRE', ts: data.fechaEvento, payload: { motivo: c.cerradoMotivo, cicloUuid: c.uuid } });
-          break;
-      }
-    }
+    pushEvento(e, {
+      tipo: 'ENVIO',
+      ts: spec.fechaEvento,
+      payload: { cicloUuid: c.uuid, envioUuid: env.uuid, numeroEnvio: env.numeroEnvio, empresa: env.empresaST, empresaST: env.empresaST, responsable: env.responsable },
+    });
+    pushEvento(e, {
+      tipo: 'ESTADO', ts: spec.fechaEvento,
+      payload: { a: 'ServicioTecnico', origen: 'ENVIO' },
+    });
 
     persist('equipos');
-    return { equipo: e, ciclo: c, nextEslabon, closed };
+    return { equipo: e, ciclo: c, envio: env };
   },
 
-  saveBorrador(equipoUuid, cicloUuid, eslabon, data) {
+  /**
+   * Agrega una recepción. Si `envioUuid` es null, crea ciclo nuevo (recepción
+   * sin envío previo). Si está dado, vincula a ese envío y lo cierra.
+   * Cambia estado del equipo a Recepcionado. Genera pendiente "reparación".
+   */
+  agregarRecepcion(equipoUuid, envioUuid, spec) {
     const e = EQ.byUuid(equipoUuid);
-    if (!e) return;
-    const c = (e.correctivos || []).find(x => x.uuid === cicloUuid);
-    if (!c) return;
-    c.borradores = c.borradores || {};
-    c.borradores[eslabon] = Object.assign({}, data, { ts: new Date().toISOString() });
+    if (!e) throw new Error('Equipo no encontrado.');
+    if (!spec.fechaEvento) throw new Error('Falta la fecha de recepción.');
+    if (!spec.responsable || !spec.responsable.trim()) throw new Error('Elegí un responsable de la lista oficial.');
+
+    let c, env = null;
+    if (envioUuid) {
+      // Buscar el envío en cualquier ciclo del equipo
+      for (const ci of (e.correctivos || [])) {
+        env = ci.envios.find(x => x.uuid === envioUuid);
+        if (env) { c = ci; break; }
+      }
+      if (!env || !c) throw new Error('Envío no encontrado.');
+      if (!c.abierto) throw new Error('Ciclo cerrado.');
+      if (env.recepcionUuid) throw new Error('Este envío ya tiene recepción.');
+    } else {
+      c = this._nuevo(e);
+      e.correctivos = e.correctivos || [];
+      e.correctivos.push(c);
+    }
+    const rec = {
+      uuid: uuid(),
+      fechaEvento: spec.fechaEvento,
+      fechaRegistro: new Date().toISOString(),
+      guiaDespacho: spec.guiaDespacho || '',
+      responsable: spec.responsable,
+      observaciones: spec.observaciones || '',
+      envioUuid: env ? env.uuid : null,
+    };
+    c.recepciones.push(rec);
+    if (env) {
+      env.recepcionUuid = rec.uuid;
+      env.cerrado = true;
+    }
+    e.estado = 'Recepcionado';
+    e.estadoDesde = spec.fechaEvento;
+
+    pushEvento(e, {
+      tipo: 'RECEPCION',
+      ts: spec.fechaEvento,
+      payload: { cicloUuid: c.uuid, recepcionUuid: rec.uuid, envioUuid: rec.envioUuid, guiaDespacho: rec.guiaDespacho, responsable: rec.responsable },
+    });
+    pushEvento(e, {
+      tipo: 'ESTADO', ts: spec.fechaEvento,
+      payload: { a: 'Recepcionado', origen: 'RECEPCION' },
+    });
+
+    // Pendiente automático: reparación pendiente
+    const vence = addBusinessDays(new Date(), 5).toISOString();
+    const p = PENDIENTE.crear({
+      tipo: 'reparacion-pendiente',
+      descripcion: `Reparación pendiente para equipo ${e.nombre || ''} recepcionado el ${fmt.date(spec.fechaEvento)}`,
+      equipoUuid: e.uuid,
+      asignado: spec.responsable,
+      vence,
+      meta: { cicloUuid: c.uuid, recepcionUuid: rec.uuid, tipoAlerta: 'recepcion-pendiente-reparacion' },
+    });
+
     persist('equipos');
+    return { equipo: e, ciclo: c, recepcion: rec, pendiente: p };
+  },
+
+  /**
+   * Registra reparación. Cierra el ciclo. Equipo a Operativo.
+   * Cierra pendientes vinculados al ciclo.
+   * Si `cicloUuid` null: crea ciclo nuevo cerrado inmediatamente (in-situ).
+   */
+  registrarReparacion(equipoUuid, cicloUuid, spec) {
+    const e = EQ.byUuid(equipoUuid);
+    if (!e) throw new Error('Equipo no encontrado.');
+    if (!spec.fechaEvento) throw new Error('Falta la fecha de reparación.');
+    if (!spec.responsable || !spec.responsable.trim()) throw new Error('Elegí un responsable de la lista oficial.');
+
+    let c;
+    if (cicloUuid) {
+      c = (e.correctivos || []).find(x => x.uuid === cicloUuid);
+      if (!c) throw new Error('Ciclo no encontrado.');
+      if (!c.abierto) throw new Error('Ciclo ya cerrado.');
+    } else {
+      // In-situ: ciclo nuevo cerrado de inmediato
+      c = this._nuevo(e);
+      e.correctivos = e.correctivos || [];
+      e.correctivos.push(c);
+    }
+    c.reparacion = {
+      fechaEvento: spec.fechaEvento,
+      fechaRegistro: new Date().toISOString(),
+      responsable: spec.responsable,
+      observaciones: spec.observaciones || '',
+    };
+    c.abierto = false;
+    c.cerrado = new Date().toISOString();
+
+    // Tiempo total del ciclo
+    const primerEv = [
+      c.solicitud?.fechaEvento,
+      ...(c.envios || []).map(x => x.fechaEvento),
+      ...(c.recepciones || []).map(x => x.fechaEvento),
+      c.reparacion.fechaEvento,
+    ].filter(Boolean).map(t => new Date(t).getTime()).sort((a,b) => a-b)[0];
+    if (primerEv) {
+      const dias = Math.round((new Date(c.reparacion.fechaEvento).getTime() - primerEv) / 86400000 * 10) / 10;
+      c.tiempoTotalDias = Math.max(0, dias);
+    }
+
+    e.estado = 'Operativo';
+    e.estadoDesde = spec.fechaEvento;
+
+    pushEvento(e, {
+      tipo: 'REPARACION',
+      ts: spec.fechaEvento,
+      payload: { cicloUuid: c.uuid, responsable: spec.responsable, observaciones: spec.observaciones || '', tiempoTotalDias: c.tiempoTotalDias || null },
+    });
+    pushEvento(e, {
+      tipo: 'ESTADO', ts: spec.fechaEvento,
+      payload: { a: 'Operativo', origen: 'REPARACION' },
+    });
+
+    // Cerrar pendientes vinculados al ciclo (excepto los ya cerrados).
+    let pendientesCerrados = 0;
+    STATE.pendientes.forEach(p => {
+      if (p.estado !== 'Cerrado' && p.meta && p.meta.cicloUuid === c.uuid) {
+        PENDIENTE.cambiarEstado(p.id, 'Cerrado', 'Cerrado automáticamente: ciclo correctivo finalizado.');
+        pendientesCerrados++;
+      }
+    });
+
+    persist('equipos');
+    return { equipo: e, ciclo: c, pendientesCerrados };
   },
 
   cancelar(equipoUuid, cicloUuid, motivo) {
@@ -1797,9 +1800,9 @@ const CICLO = {
     if (!c) return;
     c.abierto = false;
     c.cancelado = true;
-    c.cerradoEn = new Date().toISOString();
+    c.cerrado = new Date().toISOString();
     c.cerradoMotivo = motivo || 'Cancelado';
-    pushEvento(e, { tipo: 'CICLO-CANCEL', ts: c.cerradoEn, payload: { cicloUuid: c.uuid, motivo } });
+    pushEvento(e, { tipo: 'CICLO-CANCEL', ts: c.cerrado, payload: { cicloUuid: c.uuid, motivo } });
     persist('equipos');
   },
 
@@ -1810,13 +1813,32 @@ const CICLO = {
     if (!c) return;
     c.abierto = true;
     c.cancelado = false;
-    c.cerradoEn = null;
+    c.cerrado = null;
     c.cerradoMotivo = null;
+    if (c.reparacion) c.reparacion = null;
     pushEvento(e, { tipo: 'CICLO-REABRIR', ts: new Date().toISOString(), payload: { cicloUuid: c.uuid } });
     persist('equipos');
   },
+
+  /** Stub temporal para evitar errores hasta limpiar call sites del modelo viejo. */
+  crear(equipoUuid, spec) {
+    // Backward-compat shim: las pocas llamadas que quedan al viejo crear() lo usan
+    // para arrancar ciclo desde causal C3 / SI_NO_OP. Las redirigimos a crearSolicitud
+    // si hay folioSigem, o lanzamos error si no.
+    if (spec && spec.folioSigem && spec.responsable && spec.fechaEvento) {
+      return this.crearSolicitud(equipoUuid, {
+        fechaEvento: spec.fechaEvento,
+        folioSigem: spec.folioSigem,
+        responsable: spec.responsable,
+        observaciones: spec.descripcion || spec.observaciones || '',
+      });
+    }
+    throw new Error('CICLO.crear() del modelo viejo eliminado. Usá crearSolicitud / agregarEnvio / agregarRecepcion / registrarReparacion.');
+  },
 };
 
+// Mapa preservado para retrocompatibilidad con eventos de tipo CICLO-* del
+// modelo viejo (describeEvento los presenta con label legible).
 const ESLABONES_LABEL = {
   apertura: 'Apertura',
   diagnostico: 'Diagnóstico',
@@ -1826,17 +1848,7 @@ const ESLABONES_LABEL = {
   recepcion: 'Recepción',
   reparacion: 'Reparación',
 };
-const ESLABONES_ORDEN = {
-  interna:           ['apertura','diagnostico','reparacion'],
-  compra_primero:    ['apertura','diagnostico','compra','envio','recepcion','reparacion'],
-  envio_diagnostico: ['apertura','diagnostico','envio','compra','recepcion','reparacion'],
-};
-const RUTAS_OPCIONES = [
-  { value: 'interna',           label: 'Interna · reparación en sitio' },
-  { value: 'compra_primero',    label: 'Compra primero · luego envío' },
-  { value: 'envio_diagnostico', label: 'Envío primero · diagnóstico externo' },
-];
-const ESLABON_DONE = (c, es) => !!(c[es] && c[es].fechaEvento);
+
 
 const ESTADOS_PENDIENTE = ['Abierto','EnCurso','Esperando','Cerrado'];
 const ESTADO_PENDIENTE_LABEL = {
@@ -2019,6 +2031,185 @@ function migrarPendientesV33(arr) {
   return touched;
 }
 
+/**
+ * Migración v34 del ciclo correctivo. Decisión: el modelo viejo
+ * (apertura / diagnostico / compra / garantia / envio (singular) /
+ * recepcion / reparacion) se reemplaza por { solicitud, envios[],
+ * recepciones[], reparacion }.
+ *
+ * - Ciclos ABIERTOS del modelo viejo: se descartan.
+ * - Ciclos CERRADOS del modelo viejo: se convierten extrayendo lo que
+ *   se puede (apertura→solicitud, envio singular→envios[], recepcion
+ *   singular→recepciones[]). Datos de diagnostico/compra/garantia se
+ *   pierden (quedan en `c.legacyExtra` para auditoría).
+ * - Registros MP con correctivoUuid huérfano: se limpian.
+ * - Idempotente vía `c.__migradoV34 = true`.
+ *
+ * @returns { descartadosAbiertos, convertidos, mpsLimpiados }
+ */
+function migrarCiclosV34(equipos) {
+  if (!Array.isArray(equipos)) return { descartadosAbiertos:0, convertidos:0, mpsLimpiados:0 };
+  let descartadosAbiertos = 0, convertidos = 0, mpsLimpiados = 0;
+  const uuidsValidos = new Set();
+
+  equipos.forEach(e => {
+    if (!Array.isArray(e.correctivos)) { e.correctivos = []; return; }
+    const nuevoCorrectivos = [];
+    e.correctivos.forEach(c => {
+      if (c && c.__migradoV34) {
+        nuevoCorrectivos.push(c);
+        uuidsValidos.add(c.uuid);
+        return;
+      }
+      // Detectar si es esquema viejo: tiene apertura/diagnostico/compra/garantia/envio-singular
+      const esViejo = c && (c.apertura || c.diagnostico || c.compra || c.garantia || c.solicitud ||
+        (c.envio && !Array.isArray(c.envios)) ||
+        (c.recepcion && !Array.isArray(c.recepciones)) ||
+        c.eslabonActual || c.ruta);
+      if (!esViejo && Array.isArray(c.envios) && Array.isArray(c.recepciones)) {
+        c.__migradoV34 = true;
+        nuevoCorrectivos.push(c);
+        uuidsValidos.add(c.uuid);
+        return;
+      }
+      // Esquema viejo:
+      if (c.abierto) {
+        console.warn('[migrarCiclosV34] descartando ciclo abierto viejo', c.uuid, 'del equipo', e.uuid);
+        descartadosAbiertos++;
+        return;
+      }
+      // Cerrado: convertir
+      const conv = {
+        uuid: c.uuid || uuid(),
+        abierto: false,
+        enGarantia: !!c.enGarantia,
+        solicitud: null,
+        envios: [],
+        recepciones: [],
+        reparacion: null,
+        eventos: Array.isArray(c.eventos) ? c.eventos : [],
+        creado: c.apertura?.fechaRegistro || c.apertura?.fecha || null,
+        cerrado: c.cerradoEn || c.cerradoFecha || null,
+        legacyExtra: { diagnostico: c.diagnostico, compra: c.compra, garantia: c.garantia, ruta: c.ruta },
+        __migradoV34: true,
+      };
+      if (c.apertura) {
+        conv.solicitud = {
+          fechaEvento: c.apertura.fechaEvento || c.apertura.fecha || conv.creado,
+          fechaRegistro: c.apertura.fechaRegistro || conv.creado,
+          folioSigem: c.apertura.folioSigem || '',
+          responsable: c.apertura.responsable || '',
+          observaciones: c.apertura.descripcion || '',
+        };
+      } else if (c.solicitud && !Array.isArray(c.solicitud)) {
+        conv.solicitud = {
+          fechaEvento: c.solicitud.fecha || c.solicitud.fechaEvento || conv.creado,
+          fechaRegistro: c.solicitud.fechaRegistro || conv.creado,
+          folioSigem: c.solicitud.folioSigem || '',
+          responsable: c.solicitud.responsable || '',
+          observaciones: c.solicitud.descripcion || c.solicitud.observaciones || '',
+        };
+      }
+      if (c.envio) {
+        conv.envios.push({
+          uuid: uuid(),
+          fechaEvento: c.envio.fechaEvento || c.envio.fecha,
+          fechaRegistro: c.envio.fechaRegistro || c.envio.fechaEvento,
+          numeroEnvio: c.envio.folioEnvio || c.envio.numeroEnvio || '',
+          empresaST: c.envio.empresa || '',
+          responsable: c.envio.responsable || '',
+          observaciones: c.envio.observaciones || '',
+          recepcionUuid: null,
+          cerrado: true,
+        });
+      }
+      if (c.recepcion) {
+        const recUuid = uuid();
+        conv.recepciones.push({
+          uuid: recUuid,
+          fechaEvento: c.recepcion.fechaEvento || c.recepcion.fecha,
+          fechaRegistro: c.recepcion.fechaRegistro || c.recepcion.fechaEvento,
+          guiaDespacho: c.recepcion.guiaDespacho || '',
+          responsable: c.recepcion.responsable || '',
+          observaciones: c.recepcion.observaciones || '',
+          envioUuid: conv.envios[0] ? conv.envios[0].uuid : null,
+        });
+        if (conv.envios[0]) conv.envios[0].recepcionUuid = recUuid;
+      }
+      if (c.reparacion) {
+        conv.reparacion = {
+          fechaEvento: c.reparacion.fechaEvento || c.reparacion.fecha,
+          fechaRegistro: c.reparacion.fechaRegistro || c.reparacion.fechaEvento,
+          responsable: c.reparacion.responsable || '',
+          observaciones: c.reparacion.observaciones || c.reparacion.obs || '',
+        };
+      }
+      nuevoCorrectivos.push(conv);
+      uuidsValidos.add(conv.uuid);
+      convertidos++;
+    });
+    e.correctivos = nuevoCorrectivos;
+  });
+
+  // Limpiar correctivoUuid huérfanos en historial
+  equipos.forEach(e => {
+    (e.historial || []).forEach(r => {
+      if (r.correctivoUuid && !uuidsValidos.has(r.correctivoUuid)) {
+        r.correctivoUuid = null;
+        r.observacionMigracion = 'Ciclo asociado eliminado en migración v34';
+        mpsLimpiados++;
+      }
+    });
+  });
+
+  return { descartadosAbiertos, convertidos, mpsLimpiados };
+}
+
+/**
+ * Calcula los días totales que el equipo estuvo en un estado dado.
+ * Recorre los eventos tipo ESTADO ordenados ascendentemente, sumando los
+ * tramos en los que el equipo estuvo en `estadoTarget`. Si actualmente
+ * está en ese estado, suma desde el último cambio hasta ahora.
+ *
+ * @returns número decimal de días (1 decimal).
+ */
+function tiempoEnEstado(equipo, estadoTarget) {
+  if (!equipo || !estadoTarget) return 0;
+  // Construir línea de tiempo de cambios de estado a partir de eventos.
+  const cambios = (equipo.eventos || [])
+    .filter(ev => ev.tipo === 'ESTADO' && ev.payload && ev.payload.a)
+    .map(ev => ({ ts: new Date(ev.ts).getTime(), a: ev.payload.a }))
+    .filter(x => !isNaN(x.ts))
+    .sort((a,b) => a.ts - b.ts);
+  if (!cambios.length) {
+    // Sin historial de eventos ESTADO: usar estadoDesde para el estado actual.
+    if (equipo.estado === estadoTarget && equipo.estadoDesde) {
+      const ms = Date.now() - new Date(equipo.estadoDesde).getTime();
+      return Math.round((ms / 86400000) * 10) / 10;
+    }
+    return 0;
+  }
+  let totalMs = 0;
+  let actualEstado = null, actualDesde = null;
+  cambios.forEach(c => {
+    if (actualEstado === estadoTarget && actualDesde != null) {
+      totalMs += c.ts - actualDesde;
+    }
+    actualEstado = c.a;
+    actualDesde = c.ts;
+  });
+  if (actualEstado === estadoTarget && actualDesde != null) {
+    totalMs += Date.now() - actualDesde;
+  }
+  return Math.round((totalMs / 86400000) * 10) / 10;
+}
+
+function diasEnEstadoActual(equipo) {
+  if (!equipo.estadoDesde) return null;
+  const ms = Date.now() - new Date(equipo.estadoDesde).getTime();
+  return Math.round((ms / 86400000) * 10) / 10;
+}
+
 function pushEvento(equipo, ev) {
   equipo.eventos = equipo.eventos || [];
   equipo.eventos.push({
@@ -2183,18 +2374,17 @@ function alertasDeEquipo(equipo) {
   });
 
   // Ciclo con SIGEM pendiente
-  (equipo.correctivos || []).filter(c => c.abierto && c.apertura?.sigemEstado === 'falta' && !c.apertura?.folioSigem).forEach(c => {
-    out.push({
-      kind: 'warning',
-      icon: 'ti-file-alert',
-      text: `Ciclo abierto sin folio SIGEM. Pendiente con vencimiento ${
-        c.apertura?.pendienteSigemId
-          ? fmt.date(STATE.pendientes.find(p => p.id === c.apertura.pendienteSigemId)?.vence)
-          : '—'
-      }.`,
-      action: { label: 'Completar folio', handler: () => abrirModalCompletarSigem(equipo, c) },
-    });
-  });
+  // Alerta R6: equipo lleva >30 días en un estado no-operativo (NoOp / ST / Recepcionado).
+  if (ESTADOS_NO_OPERATIVOS.includes(equipo.estado) && equipo.estadoDesde) {
+    const dias = fmt.daysSince(equipo.estadoDesde);
+    if (dias != null && dias > 30) {
+      out.push({
+        kind: 'danger',
+        icon: 'ti-alert-octagon',
+        text: `Equipo lleva ${dias} días en estado ${ESTADO_LABEL[equipo.estado]}. Revisar avance del ciclo.`,
+      });
+    }
+  }
 
   return out;
 }
@@ -2991,15 +3181,23 @@ async function exportReporteGeneral() {
   wsI['!cols'] = [{wch:22},{wch:18},{wch:32},{wch:16},{wch:18},{wch:16},{wch:14},{wch:10},{wch:12},{wch:22},{wch:18},{wch:12},{wch:22},{wch:24}];
   XLSX.utils.book_append_sheet(wb, wsI, 'Inventario');
 
-  // === En ST / NoOperativos ===
-  const st = [['Servicio','Equipo','Serie','Estado','Estado desde','Días','Folio SIGEM','Eslabón ciclo']];
-  STATE.equipos.filter(e => e.estado === 'ServicioTecnico' || e.estado === 'NoOperativo').forEach(e => {
+  // === En ST / NoOperativos / Recepcionados ===
+  const st = [['Servicio','Equipo','Serie','Estado','Estado desde','Días','Folio SIGEM','Última actividad del ciclo']];
+  STATE.equipos.filter(e => ESTADOS_NO_OPERATIVOS.includes(e.estado)).forEach(e => {
     const ciclo = (e.correctivos||[]).find(c => c.abierto);
-    const folio = ciclo?.apertura?.folioSigem || ciclo?.solicitud?.folioSigem || '';
-    const eslabon = ciclo ? ESLABONES_LABEL[ciclo.eslabonActual] || ciclo.eslabonActual : '';
-    st.push([e.servicio||'', e.nombre||'', e.serie||'', ESTADO_LABEL[e.estado], fmt.date(e.estadoDesde), fmt.daysSince(e.estadoDesde) ?? '', folio, eslabon]);
+    const folio = ciclo?.solicitud?.folioSigem || '';
+    let ult = '—';
+    if (ciclo) {
+      const ultRec = (ciclo.recepciones||[]).slice(-1)[0];
+      const ultEnv = (ciclo.envios||[]).slice(-1)[0];
+      if (ciclo.reparacion) ult = 'reparación ' + fmt.date(ciclo.reparacion.fechaEvento);
+      else if (ultRec) ult = 'recepción ' + fmt.date(ultRec.fechaEvento);
+      else if (ultEnv) ult = 'envío ' + fmt.date(ultEnv.fechaEvento);
+      else if (ciclo.solicitud) ult = 'solicitud ' + fmt.date(ciclo.solicitud.fechaEvento);
+    }
+    st.push([e.servicio||'', e.nombre||'', e.serie||'', ESTADO_LABEL[e.estado], fmt.date(e.estadoDesde), fmt.daysSince(e.estadoDesde) ?? '', folio, ult]);
   });
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(st), 'En ST y NoOp');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(st), 'En ST · NoOp · Recep');
 
   // === MP Pendientes del mes ===
   const pend = [['Servicio','Equipo','Serie','Frecuencia','Programado','Estado equipo', respHdr, 'Días en estado']];
@@ -4403,35 +4601,6 @@ function abrirModalVinculacionC2(equipo, mp) {
   });
 }
 
-function abrirModalCompletarSigem(equipo, ciclo) {
-  let folio = '';
-  UI.modal({
-    title: 'Completar folio SIGEM',
-    sub: equipo.nombre,
-    size: 'sm',
-    content: (body) => {
-      body.appendChild(field('Folio SIGEM', inputCtl({ placeholder:'2026-12345', oninput:(e)=> folio = e.target.value })));
-    },
-    footer: (f, { close }) => {
-      f.appendChild(h('button.btn.ghost', { onclick: close }, 'Cancelar'));
-      f.appendChild(h('button.btn.primary', { onclick: () => {
-        if (!folio.trim()) { bus.emit('error', new Error('Indicá el folio.')); return; }
-        ciclo.apertura.folioSigem = folio.trim();
-        ciclo.apertura.sigemEstado = 'existe';
-        if (ciclo.apertura.pendienteSigemId) {
-          PENDIENTE.cerrar(ciclo.apertura.pendienteSigemId, `Folio ${folio.trim()} cargado`);
-          ciclo.apertura.pendienteSigemId = null;
-        }
-        pushEvento(equipo, { tipo:'SIGEM-COMPLETADO', ts: new Date().toISOString(), payload: { cicloUuid: ciclo.uuid, folio: folio.trim() } });
-        persist('equipos');
-        UI.toast('Folio SIGEM cargado.', 'success');
-        close('save');
-        Router.go(STATE.view, STATE.viewParams);
-      }}, 'Guardar folio'));
-    },
-  });
-}
-
 function abrirModalGrillaCelda(equipo, mes) {
   // Cambiar marca de grilla (X / R / RA / PM / vacío) y registrar evento.
   const actual = equipo.grilla?.[mes] || '';
@@ -4467,375 +4636,591 @@ function abrirModalGrillaCelda(equipo, mes) {
 }
 
 /* ============================================================
-   UI · CICLO VIEWER (stepper + forms por eslabón)
+   UI · CICLO CORRECTIVO v34 — 4 modales (Solicitud / Envío / Recepción / Reparación)
+   y visualización en árbol.
    ============================================================ */
-function abrirCicloViewer(equipo, ciclo, opts = {}) {
-  let active = opts.eslabon || ciclo.eslabonActual || 'diagnostico';
-  let dirty = {}; // { eslabon: { field: val } } — current form values
-  let modal;
 
-  function renderAll(body) {
-    body.innerHTML = '';
-    body.appendChild(renderStepper(equipo, ciclo, active, (es) => {
-      // Click en step: cambiar a ese eslabón
-      if (es === active) return;
-      active = es;
-      dirty = {};
-      renderAll(body);
-    }));
-    body.appendChild(renderEslabonHeader(equipo, ciclo, active, {
-      cerrarModal: () => modal.close(),
-      refresh: () => { active = ciclo.eslabonActual; renderAll(body); },
-    }));
-    if (!ciclo.abierto) {
-      body.appendChild(h('div.banner.info', { style:{marginBottom:'12px'} }, [
-        h('i.ti.ti-circle-check'),
-        h('div.grow', [
-          h('div', { style:{fontWeight:500} }, ciclo.cancelado ? 'Ciclo cancelado' : 'Ciclo cerrado'),
-          h('div', { style:{fontSize:'11.5px', marginTop:'2px'} }, `${ciclo.cerradoMotivo || ''}${ciclo.cerradoEn ? ' · ' + fmt.datetime(ciclo.cerradoEn) : ''}`),
-        ]),
-        h('button.btn.sm', { onclick: async () => {
-          const ok = await UI.dialog({ title:'Reabrir ciclo', message:'Esto vuelve a abrir el ciclo. ¿Continuar?', confirmText:'Reabrir' });
-          if (!ok) return;
-          CICLO.reabrir(equipo.uuid, ciclo.uuid);
-          UI.toast('Ciclo reabierto.', 'success');
-          renderAll(body);
-        }}, [ h('i.ti.ti-refresh'), 'Reabrir' ]),
-      ]));
-    }
-    body.appendChild(renderEslabonForm(equipo, ciclo, active, {
-      dirty,
-      cerrarModal: () => modal.close(),
-      onChange: (() => {
-        const persistBorrador = debounce((es, data) => CICLO.saveBorrador(equipo.uuid, ciclo.uuid, es, data), 800);
-        return (data) => { dirty[active] = data; persistBorrador(active, data); };
-      })(),
-      onSaved: (res) => {
-        // Después de guardar: recargar viewer
-        if (res.closed) {
-          UI.toast('Ciclo cerrado · equipo ' + (res.equipo.estado === 'Operativo' ? 'operativo' : res.equipo.estado), 'success');
-          renderAll(body);
-          return;
-        }
-        if (res.nextEslabon) {
-          active = res.nextEslabon;
-          dirty = {};
-          UI.toast(`Eslabón guardado · siguiente: ${ESLABONES_LABEL[res.nextEslabon] || res.nextEslabon}`, 'success');
-        } else {
-          UI.toast('Eslabón actualizado.', 'success');
-        }
-        renderAll(body);
-      },
-    }));
-  }
-
-  modal = UI.modal({
-    title: 'Ciclo correctivo',
-    sub: `${equipo.nombre} · ${ciclo.apertura?.folioSigem || ciclo.solicitud?.folioSigem || 'sin folio SIGEM'}`,
-    size: 'lg',
-    content: (body) => renderAll(body),
-    onClose: () => {
-      // Al cerrar, refresca la vista actual
-      if (STATE.view) Router.go(STATE.view, STATE.viewParams);
-    },
-  });
-}
-
-function renderStepper(equipo, ciclo, active, onClick) {
-  const list = CICLO.eslabones(ciclo);
-  const wrap = h('div.stepper');
-  list.forEach((es, idx) => {
-    const isQ = es === '?';
-    const cls =
-      isQ ? 'pending' :
-      ESLABON_DONE(ciclo, es) && es !== active ? 'done' :
-      es === active ? 'active' :
-      es === ciclo.eslabonActual ? 'pending' :
-      'pending';
-    const step = h(`div.step.${cls}`, {
-      onclick: () => { if (!isQ) onClick(es); },
-      title: isQ ? 'Eslabón depende de la ruta elegida' : ESLABONES_LABEL[es],
-    }, [
-      h('span.num', { html: cls === 'done' ? '' : String(idx+1) }),
-      h('span', isQ ? '· · ·' : ESLABONES_LABEL[es]),
-    ]);
-    if (isQ) step.classList.add('na');
-    wrap.appendChild(step);
-    if (idx < list.length - 1) wrap.appendChild(h('span.step-sep', '›'));
-  });
-  return wrap;
-}
-
-function renderEslabonHeader(equipo, ciclo, eslabon, ctx) {
-  const isActive = eslabon === ciclo.eslabonActual;
-  const isDone   = ESLABON_DONE(ciclo, eslabon);
-  return h('div.eslabon-h', [
-    h('div', [
-      h('h4', ESLABONES_LABEL[eslabon] || eslabon),
-      h('div.sub', isDone ? `Completado · ${fmt.date(ciclo[eslabon].fechaEvento)}` : isActive ? 'Eslabón activo' : 'Pendiente'),
-    ]),
-    h('div.grow'),
-    ciclo.ruta ? h('span.pill', ciclo.ruta.replace('_',' ')) : null,
-    ciclo.enGarantia ? h('span.pill.purple','garantía') : null,
-    h('button.btn.icon.ghost', {
-      title: 'Acciones del ciclo',
-      onclick: (ev) => abrirMenuCiclo(equipo, ciclo, ctx, ev.currentTarget),
-    }, [ h('i.ti.ti-dots') ]),
-  ]);
-}
-
-function abrirMenuCiclo(equipo, ciclo, ctx, anchor) {
-  // Menú simple como diálogo de selección
+/**
+ * + Solicitud de trabajo (rediseñado en R6).
+ * - Folio SIGEM obligatorio
+ * - Crea ciclo correctivo + pendiente automático "Avanzar ciclo correctivo"
+ * - Equipo → NoOperativo con fechaEvento
+ * Si `opts.causal` viene poblado (desde C3 / SI_NO_OP / MP No Op), pre-puebla.
+ */
+function abrirModalSolicitudTrabajo(equipo, opts={}) {
+  const causal = opts.causal || null;
+  const fechaSugerida = causal?.fechaEvento || causal?.fecha || todayISO();
+  let snap = {
+    fechaEvento: dateInputValue(fechaSugerida) || todayISO(),
+    folioSigem: '',
+    responsable: usuarioActual() || '',
+    observaciones: causal?.obs || '',
+  };
   UI.modal({
-    title: 'Acciones del ciclo',
-    size: 'sm',
-    content: (body, { close }) => {
-      const list = h('div', { style:{ display:'flex', flexDirection:'column', gap:'6px' } });
-      if (ciclo.abierto) {
-        list.appendChild(h('button.btn.ghost', { style:{justifyContent:'flex-start'}, onclick: async () => {
-          close();
-          const ok = await UI.dialog({
-            title: 'Cancelar ciclo',
-            message: '¿Cancelar este ciclo? Quedará cerrado como Cancelado y podrás reabrirlo después.',
-            confirmText: 'Cancelar ciclo', variant: 'danger',
+    title: '+ Solicitud de trabajo',
+    sub: equipo.nombre + (causal ? ` · vinculada a registro ${causal.resultado}` : ''),
+    size: 'md',
+    content: (body) => {
+      body.appendChild(h('p', { style:{margin:'0 0 12px 0', color:'var(--ink-2)', fontSize:'12.5px'} },
+        'Registra una solicitud SIGEM y abre el ciclo correctivo. El equipo pasa a No Operativo con la fecha real, y se genera un pendiente para hacer seguimiento del ciclo.'));
+      body.appendChild(row('1fr 1fr', [
+        field('Folio SIGEM *', inputCtl({ value: snap.folioSigem, placeholder:'p. ej. 19-5988', oninput:(e)=> snap.folioSigem = e.target.value })),
+        field('Fecha real de la solicitud *', dateCtl(snap.fechaEvento, { max: todayISO(), onchange:(e)=> snap.fechaEvento = e.target.value }), 'Admite retroactivo. No puede ser futura.'),
+      ]));
+      body.appendChild(field('Responsable *', selectTecnico(snap.responsable, { onchange:(e)=> snap.responsable = e.target.value })));
+      body.appendChild(field('Observaciones', textareaCtl({ rows:3, value: snap.observaciones, oninput:(e)=> snap.observaciones = e.target.value })));
+    },
+    footer: (f, { close }) => {
+      f.appendChild(h('button.btn.ghost', { onclick: close }, 'Cancelar'));
+      f.appendChild(h('button.btn.primary', { onclick: () => {
+        try {
+          const fechaISO = isoFromDateInput(snap.fechaEvento);
+          if (!fechaISO) throw new Error('Fecha inválida.');
+          const res = CICLO.crearSolicitud(equipo.uuid, {
+            fechaEvento: fechaISO,
+            folioSigem: snap.folioSigem,
+            responsable: snap.responsable,
+            observaciones: snap.observaciones,
           });
-          if (!ok) return;
-          CICLO.cancelar(equipo.uuid, ciclo.uuid, 'Cancelado por el operador');
-          UI.toast('Ciclo cancelado.', 'warning');
-          ctx.refresh();
-        } }, [ h('i.ti.ti-ban'), 'Cancelar ciclo' ]));
-        list.appendChild(h('button.btn.ghost', { style:{justifyContent:'flex-start'}, onclick: () => {
-          close();
-          // Para cambiar ruta o garantía, simplemente reabrir el diagnóstico en modo edición
-          if (!ciclo.diagnostico) { UI.toast('Aún no hay diagnóstico. Editá el diagnóstico desde el stepper.', 'info'); return; }
-          ctx.refresh();
-        } }, [ h('i.ti.ti-route'), 'Cambiar ruta / garantía (editar diagnóstico)' ]));
-      } else {
-        list.appendChild(h('button.btn.ghost', { style:{justifyContent:'flex-start'}, onclick: async () => {
-          close();
-          CICLO.reabrir(equipo.uuid, ciclo.uuid);
-          UI.toast('Ciclo reabierto.', 'success');
-          ctx.refresh();
-        } }, [ h('i.ti.ti-refresh'), 'Reabrir ciclo' ]));
-      }
-      body.appendChild(list);
+          // Vincular causal si aplica
+          if (causal) {
+            causal.correctivoUuid = res.ciclo.uuid;
+            causal.sinVincular = false;
+            persist('equipos');
+          }
+          UI.toast(`Solicitud creada · ciclo correctivo abierto · pendiente generado (vence ${fmt.date(res.pendiente.vence)}).`, 'success', { duration: 6500 });
+          close('save');
+          if (STATE.view) Router.go(STATE.view, STATE.viewParams);
+        } catch (e) { bus.emit('error', e); }
+      } }, [ h('i.ti.ti-device-floppy'), 'Crear solicitud' ]));
     },
   });
 }
 
-function renderEslabonForm(equipo, ciclo, eslabon, ctx) {
+/**
+ * + Envío a Servicio Técnico.
+ * Pide elegir solicitud abierta sin envío, o "iniciar desde envío".
+ * Si `opts.causal` viene, pre-puebla observaciones.
+ */
+function abrirModalEnvioST(equipo, opts={}) {
+  const causal = opts.causal || null;
+  // Solicitudes con ciclo abierto y sin envío
+  const solicitudesAbiertas = (equipo.correctivos || []).filter(c => c.abierto && c.solicitud && (!c.envios || c.envios.length === 0));
+  let modo = solicitudesAbiertas.length ? 'existente' : 'nuevo';
+  let cicloUuidElegido = solicitudesAbiertas[0]?.uuid || null;
+  const empresasUsadas = Array.from(new Set(STATE.equipos.flatMap(e => (e.correctivos||[]).flatMap(c => (c.envios||[]).map(en => en.empresaST))).filter(Boolean))).sort();
+  let snap = {
+    fechaEvento: dateInputValue(causal?.fechaEvento || causal?.fecha) || todayISO(),
+    numeroEnvio: '',
+    empresaST: '',
+    responsable: usuarioActual() || '',
+    observaciones: causal?.obs || '',
+  };
+
+  UI.modal({
+    title: '+ Envío a Servicio Técnico',
+    sub: equipo.nombre,
+    size: 'md',
+    content: (body) => {
+      // Selector de solicitud
+      if (solicitudesAbiertas.length || true) {
+        body.appendChild(h('div', { style:{ marginBottom:'12px' } }, [
+          h('div', { style:{fontSize:'12px', color:'var(--ink-3)', marginBottom:'6px'} }, 'Vincular a:'),
+          h('div', { style:{display:'flex', flexDirection:'column', gap:'4px'} },
+            [
+              ...solicitudesAbiertas.map(c => h('label', { style:{display:'flex', gap:'8px', alignItems:'center', padding:'8px 10px', border:'.5px solid var(--line-2)', borderRadius:'6px', cursor:'pointer'} }, [
+                h('input', { type:'radio', name:'envio-modo', value:c.uuid, checked: modo==='existente' && cicloUuidElegido===c.uuid,
+                  onchange:(e)=> { modo='existente'; cicloUuidElegido = e.target.value; } }),
+                h('div', { style:{flex:1, fontSize:'12.5px'} }, [
+                  h('div', { style:{fontWeight:500} }, `Solicitud · folio ${c.solicitud.folioSigem}`),
+                  h('div', { style:{color:'var(--ink-3)', fontSize:'11.5px'} }, `${fmt.date(c.solicitud.fechaEvento)} · ${c.solicitud.responsable} · hace ${fmt.daysSince(c.solicitud.fechaEvento)}d`),
+                ]),
+              ])),
+              h('label', { style:{display:'flex', gap:'8px', alignItems:'center', padding:'8px 10px', border:'.5px solid var(--line-2)', borderRadius:'6px', cursor:'pointer'} }, [
+                h('input', { type:'radio', name:'envio-modo', value:'', checked: modo==='nuevo',
+                  onchange:()=> { modo='nuevo'; cicloUuidElegido = null; } }),
+                h('div', { style:{fontSize:'12.5px'} }, 'Iniciar el ciclo desde el envío (sin solicitud previa)'),
+              ]),
+            ]),
+        ]));
+      }
+      const datalistEmpresa = h('datalist', { id:'empresasST-list' });
+      empresasUsadas.forEach(em => datalistEmpresa.appendChild(h('option', { value: em })));
+      body.appendChild(datalistEmpresa);
+      body.appendChild(row('1fr 1fr', [
+        field('Número de envío *', inputCtl({ value: snap.numeroEnvio, placeholder:'p. ej. 1234', oninput:(e)=> snap.numeroEnvio = e.target.value })),
+        field('Fecha del envío *', dateCtl(snap.fechaEvento, { max: todayISO(), onchange:(e)=> snap.fechaEvento = e.target.value })),
+      ]));
+      body.appendChild(row('1fr 1fr', [
+        field('Empresa ST *', inputCtl({ value: snap.empresaST, list:'empresasST-list', placeholder:'p. ej. Mindray', oninput:(e)=> snap.empresaST = e.target.value })),
+        field('Responsable *', selectTecnico(snap.responsable, { onchange:(e)=> snap.responsable = e.target.value })),
+      ]));
+      body.appendChild(field('Observaciones', textareaCtl({ rows:2, value: snap.observaciones, oninput:(e)=> snap.observaciones = e.target.value })));
+    },
+    footer: (f, { close }) => {
+      f.appendChild(h('button.btn.ghost', { onclick: close }, 'Cancelar'));
+      f.appendChild(h('button.btn.primary', { onclick: () => {
+        try {
+          const fechaISO = isoFromDateInput(snap.fechaEvento);
+          if (!fechaISO) throw new Error('Fecha inválida.');
+          const res = CICLO.agregarEnvio(equipo.uuid, modo === 'existente' ? cicloUuidElegido : null, {
+            fechaEvento: fechaISO,
+            numeroEnvio: snap.numeroEnvio,
+            empresaST: snap.empresaST,
+            responsable: snap.responsable,
+            observaciones: snap.observaciones,
+          });
+          if (causal) { causal.correctivoUuid = res.ciclo.uuid; causal.sinVincular = false; persist('equipos'); }
+          UI.toast(`Envío registrado · equipo en Servicio Técnico.`, 'success');
+          close('save');
+          if (STATE.view) Router.go(STATE.view, STATE.viewParams);
+        } catch (e) { bus.emit('error', e); }
+      } }, [ h('i.ti.ti-device-floppy'), 'Registrar envío' ]));
+    },
+  });
+}
+
+/**
+ * + Recepción. Pide elegir envío abierto o "iniciar desde recepción".
+ */
+function abrirModalRecepcion(equipo) {
+  // Envíos sin recepción y ciclo abierto
+  const enviosPendientes = (equipo.correctivos || []).flatMap(c =>
+    c.abierto ? (c.envios || []).filter(en => !en.recepcionUuid).map(en => ({ ciclo: c, envio: en })) : []
+  );
+  let modo = enviosPendientes.length ? 'existente' : 'nuevo';
+  let envioUuidElegido = enviosPendientes[0]?.envio.uuid || null;
+  let snap = {
+    fechaEvento: todayISO(),
+    guiaDespacho: '',
+    responsable: usuarioActual() || '',
+    observaciones: '',
+  };
+
+  UI.modal({
+    title: '+ Recepción',
+    sub: equipo.nombre,
+    size: 'md',
+    content: (body) => {
+      body.appendChild(h('div', { style:{ marginBottom:'12px' } }, [
+        h('div', { style:{fontSize:'12px', color:'var(--ink-3)', marginBottom:'6px'} }, 'Vincular a:'),
+        h('div', { style:{display:'flex', flexDirection:'column', gap:'4px'} },
+          [
+            ...enviosPendientes.map(({ ciclo, envio }) => h('label', { style:{display:'flex', gap:'8px', alignItems:'center', padding:'8px 10px', border:'.5px solid var(--line-2)', borderRadius:'6px', cursor:'pointer'} }, [
+              h('input', { type:'radio', name:'recep-modo', value: envio.uuid, checked: modo==='existente' && envioUuidElegido===envio.uuid,
+                onchange:(e)=> { modo='existente'; envioUuidElegido = e.target.value; } }),
+              h('div', { style:{flex:1, fontSize:'12.5px'} }, [
+                h('div', { style:{fontWeight:500} }, `Envío ${envio.numeroEnvio} · ${envio.empresaST}`),
+                h('div', { style:{color:'var(--ink-3)', fontSize:'11.5px'} }, `${fmt.date(envio.fechaEvento)} · hace ${fmt.daysSince(envio.fechaEvento)}d en ST`),
+              ]),
+            ])),
+            h('label', { style:{display:'flex', gap:'8px', alignItems:'center', padding:'8px 10px', border:'.5px solid var(--line-2)', borderRadius:'6px', cursor:'pointer'} }, [
+              h('input', { type:'radio', name:'recep-modo', value:'', checked: modo==='nuevo',
+                onchange:()=> { modo='nuevo'; envioUuidElegido = null; } }),
+              h('div', { style:{fontSize:'12.5px'} }, 'Iniciar el flujo desde la recepción (sin envío previo)'),
+            ]),
+          ]),
+      ]));
+      body.appendChild(row('1fr 1fr', [
+        field('Fecha de recepción *', dateCtl(snap.fechaEvento, { max: todayISO(), onchange:(e)=> snap.fechaEvento = e.target.value })),
+        field('Guía de despacho', inputCtl({ value: snap.guiaDespacho, oninput:(e)=> snap.guiaDespacho = e.target.value })),
+      ]));
+      body.appendChild(field('Responsable *', selectTecnico(snap.responsable, { onchange:(e)=> snap.responsable = e.target.value })));
+      body.appendChild(field('Observaciones', textareaCtl({ rows:2, value: snap.observaciones, oninput:(e)=> snap.observaciones = e.target.value })));
+    },
+    footer: (f, { close }) => {
+      f.appendChild(h('button.btn.ghost', { onclick: close }, 'Cancelar'));
+      f.appendChild(h('button.btn.primary', { onclick: () => {
+        try {
+          const fechaISO = isoFromDateInput(snap.fechaEvento);
+          if (!fechaISO) throw new Error('Fecha inválida.');
+          const res = CICLO.agregarRecepcion(equipo.uuid, modo === 'existente' ? envioUuidElegido : null, {
+            fechaEvento: fechaISO,
+            guiaDespacho: snap.guiaDespacho,
+            responsable: snap.responsable,
+            observaciones: snap.observaciones,
+          });
+          UI.toast(`Recepción registrada · pendiente de reparación creado (vence ${fmt.date(res.pendiente.vence)}).`, 'success', { duration: 6000 });
+          close('save');
+          if (STATE.view) Router.go(STATE.view, STATE.viewParams);
+        } catch (e) { bus.emit('error', e); }
+      } }, [ h('i.ti.ti-device-floppy'), 'Registrar recepción' ]));
+    },
+  });
+}
+
+/**
+ * + Reparación. Pide elegir ciclo abierto o "in-situ" (crear ciclo cerrado).
+ * Cierra pendientes vinculados al ciclo.
+ */
+function abrirModalReparacion(equipo) {
+  // Ciclos abiertos ordenados por prioridad (recepcionados primero, luego envío sin recepción, luego solo solicitud)
+  const ciclosAbiertos = (equipo.correctivos || []).filter(c => c.abierto);
+  function prioridad(c) {
+    const tieneRecepNoReparada = c.recepciones && c.recepciones.length > c.envios.filter(e => e.recepcionUuid).length + (c.envios.length - c.envios.filter(e => e.recepcionUuid).length === 0 ? 0 : 0);
+    const ultRecep = (c.recepciones||[]).length > 0;
+    const envSinRecep = (c.envios||[]).some(e => !e.recepcionUuid);
+    if (ultRecep && c.envios.every(e => e.recepcionUuid)) return 0;  // recepcionado, falta reparación
+    if (envSinRecep) return 1;
+    if (c.solicitud) return 2;
+    return 3;
+  }
+  ciclosAbiertos.sort((a,b) => prioridad(a) - prioridad(b));
+  let modo = ciclosAbiertos.length ? 'existente' : 'nuevo';
+  let cicloUuidElegido = ciclosAbiertos[0]?.uuid || null;
+  let snap = {
+    fechaEvento: todayISO(),
+    responsable: usuarioActual() || '',
+    observaciones: '',
+  };
+
+  UI.modal({
+    title: '+ Reparación',
+    sub: equipo.nombre,
+    size: 'md',
+    content: (body) => {
+      body.appendChild(h('div', { style:{ marginBottom:'12px' } }, [
+        h('div', { style:{fontSize:'12px', color:'var(--ink-3)', marginBottom:'6px'} }, 'Vincular a:'),
+        h('div', { style:{display:'flex', flexDirection:'column', gap:'4px'} },
+          [
+            ...ciclosAbiertos.map(c => {
+              const tieneRecep = (c.recepciones||[]).length > 0;
+              const ultEvento = tieneRecep
+                ? `recepción ${fmt.date(c.recepciones[c.recepciones.length-1].fechaEvento)}`
+                : (c.envios||[]).length
+                  ? `envío ${c.envios[c.envios.length-1].numeroEnvio} sin recepción`
+                  : `solo solicitud`;
+              const folio = c.solicitud?.folioSigem || '(sin folio)';
+              return h('label', { style:{display:'flex', gap:'8px', alignItems:'center', padding:'8px 10px', border:'.5px solid var(--line-2)', borderRadius:'6px', cursor:'pointer'} }, [
+                h('input', { type:'radio', name:'rep-modo', value:c.uuid, checked: modo==='existente' && cicloUuidElegido===c.uuid,
+                  onchange:(e)=> { modo='existente'; cicloUuidElegido = e.target.value; } }),
+                h('div', { style:{flex:1, fontSize:'12.5px'} }, [
+                  h('div', { style:{fontWeight:500} }, `Ciclo · folio ${folio}`),
+                  h('div', { style:{color:'var(--ink-3)', fontSize:'11.5px'} }, `Último: ${ultEvento}`),
+                ]),
+              ]);
+            }),
+            h('label', { style:{display:'flex', gap:'8px', alignItems:'center', padding:'8px 10px', border:'.5px solid var(--line-2)', borderRadius:'6px', cursor:'pointer'} }, [
+              h('input', { type:'radio', name:'rep-modo', value:'', checked: modo==='nuevo',
+                onchange:()=> { modo='nuevo'; cicloUuidElegido = null; } }),
+              h('div', { style:{fontSize:'12.5px'} }, 'Reparación in-situ sin envío previo (crear ciclo cerrado)'),
+            ]),
+          ]),
+      ]));
+      body.appendChild(row('1fr 1fr', [
+        field('Fecha de reparación *', dateCtl(snap.fechaEvento, { max: todayISO(), onchange:(e)=> snap.fechaEvento = e.target.value })),
+        field('Responsable *', selectTecnico(snap.responsable, { onchange:(e)=> snap.responsable = e.target.value })),
+      ]));
+      body.appendChild(field('Observaciones / resultado', textareaCtl({ rows:3, value: snap.observaciones, oninput:(e)=> snap.observaciones = e.target.value })));
+      body.appendChild(h('div.banner.info', [ h('i.ti.ti-info-circle'), h('div.grow','Al guardar, el ciclo se cierra, el equipo vuelve a Operativo y se cierran automáticamente los pendientes vinculados al ciclo.') ]));
+    },
+    footer: (f, { close }) => {
+      f.appendChild(h('button.btn.ghost', { onclick: close }, 'Cancelar'));
+      f.appendChild(h('button.btn.primary', { onclick: () => {
+        try {
+          const fechaISO = isoFromDateInput(snap.fechaEvento);
+          if (!fechaISO) throw new Error('Fecha inválida.');
+          const res = CICLO.registrarReparacion(equipo.uuid, modo === 'existente' ? cicloUuidElegido : null, {
+            fechaEvento: fechaISO,
+            responsable: snap.responsable,
+            observaciones: snap.observaciones,
+          });
+          const n = res.pendientesCerrados || 0;
+          UI.toast(`Reparación registrada · ciclo cerrado · equipo Operativo${n ? ` · ${n} pendiente${n>1?'s':''} cerrado${n>1?'s':''}` : ''}.`, 'success', { duration: 6000 });
+          close('save');
+          if (STATE.view) Router.go(STATE.view, STATE.viewParams);
+        } catch (e) { bus.emit('error', e); }
+      } }, [ h('i.ti.ti-device-floppy'), 'Registrar reparación' ]));
+    },
+  });
+}
+
+/**
+ * Visualización del ciclo como árbol de eventos relacionados.
+ * Reemplaza el viejo viewer con stepper.
+ */
+function renderCicloEventos(equipo, ciclo) {
   const wrap = h('div');
-  const isActive   = eslabon === ciclo.eslabonActual;
-  const isRetro    = ESLABON_DONE(ciclo, eslabon) && !isActive;     // retroactive edit
-  const isFuture   = !ESLABON_DONE(ciclo, eslabon) && !isActive;    // sin alcanzar aún
-  const borrador   = ciclo.borradores?.[eslabon] || null;
-  const prev       = ciclo[eslabon] || null;
-  const defaults   = Object.assign({}, prev || {}, borrador || {});
-  const snap       = ctx.dirty[eslabon] || defaults;
+  const folio = ciclo.solicitud?.folioSigem || null;
 
-  if (isFuture && !borrador) {
-    wrap.appendChild(h('div.empty', { style:{padding:'30px 12px'} }, [
-      h('i.ti.ti-arrow-left-bar'),
-      h('h4', 'Eslabón aún no alcanzado'),
-      h('p', 'Se habilita cuando avances los eslabones previos. Podés saltar a otro desde el stepper de arriba.'),
+  // Header
+  const cicloIdx = (equipo.correctivos || []).indexOf(ciclo) + 1;
+  const header = h('div.card-h', [
+    h('h3', `Ciclo correctivo #${cicloIdx} · ${ciclo.abierto ? 'abierto' : (ciclo.cancelado ? 'cancelado' : 'cerrado')}`),
+    folio ? h('span.sub', `Folio ${folio}`) : null,
+    ciclo.enGarantia ? h('span.pill.purple', 'En garantía') : null,
+    ciclo.abierto ? h('span.pill.warning', 'Abierto') : (ciclo.cancelado ? h('span.pill.danger','Cancelado') : h('span.pill.success', 'Cerrado')),
+  ]);
+  wrap.appendChild(header);
+
+  // Tarjetas de tiempos
+  const tNoOp = tiempoEnEstado(equipo, 'NoOperativo');
+  const tST   = tiempoEnEstado(equipo, 'ServicioTecnico');
+  const tRec  = tiempoEnEstado(equipo, 'Recepcionado');
+  const tTotal = ciclo.tiempoTotalDias != null ? ciclo.tiempoTotalDias :
+    (() => {
+      const stamps = [
+        ciclo.solicitud?.fechaEvento,
+        ...(ciclo.envios||[]).map(x => x.fechaEvento),
+        ...(ciclo.recepciones||[]).map(x => x.fechaEvento),
+        ciclo.reparacion?.fechaEvento,
+      ].filter(Boolean).map(t => new Date(t).getTime()).sort((a,b) => a-b);
+      if (!stamps.length) return null;
+      const fin = ciclo.reparacion?.fechaEvento ? new Date(ciclo.reparacion.fechaEvento).getTime() : Date.now();
+      return Math.round((fin - stamps[0]) / 86400000 * 10) / 10;
+    })();
+  wrap.appendChild(h('div.kpi-grid', { style:{marginBottom:'12px'} }, [
+    kpiCard({ label:'Tiempo total ciclo', value: tTotal != null ? tTotal + 'd' : '—' }),
+    kpiCard({ label:'Acum. NoOperativo', value: tNoOp + 'd' }),
+    kpiCard({ label:'Acum. Servicio Téc.', value: tST + 'd', kind: tST > 30 ? 'warning' : '' }),
+    kpiCard({ label:'Acum. Recepcionado', value: tRec + 'd', kind: tRec > 5 ? 'warning' : '' }),
+  ]));
+
+  // Árbol
+  const tree = h('div', { style:{fontSize:'12.5px', lineHeight:'1.6', fontFamily:'inherit'} });
+  function nodo(icono, color, titulo, sub, onClick) {
+    return h('div', { style:{display:'flex', gap:'10px', alignItems:'flex-start', padding:'6px 0', cursor: onClick ? 'pointer' : 'default'}, onclick: onClick }, [
+      h('i.ti', { class: 'ti ' + icono, style:{color:'var(--'+color+')', fontSize:'16px', marginTop:'2px', flexShrink:0} }),
+      h('div', { style:{flex:1, minWidth:0} }, [
+        h('div', { style:{fontWeight:500} }, titulo),
+        sub ? h('div', { style:{color:'var(--ink-3)', fontSize:'11.5px'} }, sub) : null,
+      ]),
+    ]);
+  }
+  // Solicitud
+  if (ciclo.solicitud) {
+    const s = ciclo.solicitud;
+    tree.appendChild(nodo('ti-file-text', 'info',
+      `Solicitud de trabajo · folio ${s.folioSigem || '(sin folio)'}`,
+      `${fmt.date(s.fechaEvento)} · ${s.responsable || '—'}${s.observaciones ? ' · ' + s.observaciones : ''}`,
+    ));
+  }
+  // Envíos + recepciones (en pares)
+  (ciclo.envios || []).forEach((env, idx) => {
+    const recep = (ciclo.recepciones || []).find(r => r.envioUuid === env.uuid);
+    const diasEnvio = recep
+      ? Math.round((new Date(recep.fechaEvento).getTime() - new Date(env.fechaEvento).getTime()) / 86400000 * 10) / 10
+      : Math.round((Date.now() - new Date(env.fechaEvento).getTime()) / 86400000 * 10) / 10;
+    tree.appendChild(h('div', { style:{paddingLeft:'14px', borderLeft:'.5px solid var(--line-2)'} }, [
+      nodo('ti-truck-delivery', 'warning',
+        `Envío nº ${env.numeroEnvio} · ${env.empresaST}`,
+        `${fmt.date(env.fechaEvento)} · ${env.responsable || '—'} · ${recep ? `${diasEnvio}d en ST` : `${diasEnvio}d pendiente de recepción`}${env.observaciones ? ' · ' + env.observaciones : ''}`,
+      ),
+      recep ? h('div', { style:{paddingLeft:'18px'} }, [
+        nodo('ti-package', 'info',
+          `Recepción${recep.guiaDespacho ? ' · guía ' + recep.guiaDespacho : ''}`,
+          `${fmt.date(recep.fechaEvento)} · ${recep.responsable || '—'}${recep.observaciones ? ' · ' + recep.observaciones : ''}`,
+        ),
+      ]) : null,
     ]));
-    return wrap;
+  });
+  // Recepciones sin envío (caso edge)
+  (ciclo.recepciones || []).filter(r => !r.envioUuid).forEach(recep => {
+    tree.appendChild(nodo('ti-package', 'info',
+      `Recepción sin envío previo${recep.guiaDespacho ? ' · guía ' + recep.guiaDespacho : ''}`,
+      `${fmt.date(recep.fechaEvento)} · ${recep.responsable || '—'}`,
+    ));
+  });
+  // Reparación
+  if (ciclo.reparacion) {
+    tree.appendChild(nodo('ti-tool', 'success',
+      `Reparación · ciclo cerrado`,
+      `${fmt.date(ciclo.reparacion.fechaEvento)} · ${ciclo.reparacion.responsable || '—'}${ciclo.reparacion.observaciones ? ' · ' + ciclo.reparacion.observaciones : ''}`,
+    ));
+  } else if (ciclo.abierto) {
+    tree.appendChild(nodo('ti-circle-dashed', 'muted', '(sin reparación todavía)', 'El ciclo se cerrará al registrar la reparación.'));
   }
 
-  function pushField(node) { wrap.appendChild(node); }
-
-  let getValues = () => ({});
-  if (eslabon === 'apertura')      getValues = renderApertura(pushField, snap, ctx.onChange, equipo, ciclo);
-  else if (eslabon === 'diagnostico') getValues = renderDiagnostico(pushField, snap, ctx.onChange, ciclo);
-  else if (eslabon === 'compra')   getValues = renderCompra(pushField, snap, ctx.onChange);
-  else if (eslabon === 'garantia') getValues = renderGarantia(pushField, snap, ctx.onChange);
-  else if (eslabon === 'envio')    getValues = renderEnvio(pushField, snap, ctx.onChange);
-  else if (eslabon === 'recepcion')getValues = renderRecepcion(pushField, snap, ctx.onChange);
-  else if (eslabon === 'reparacion')getValues = renderReparacion(pushField, snap, ctx.onChange);
-
-  // Acciones
-  const acts = h('div.ciclo-actions');
-  if (borrador && !prev) {
-    acts.appendChild(h('span.pill.muted', { style:{marginRight:'auto'} }, `borrador guardado ${fmt.rel(borrador.ts)}`));
-  } else if (isRetro) {
-    acts.appendChild(h('span.pill.muted', { style:{marginRight:'auto'} }, 'edición retroactiva — no avanza el ciclo'));
-  }
-  if (isActive || isRetro) {
-    acts.appendChild(h('button.btn.ghost', { onclick: ctx.cerrarModal || (() => {}) }, 'Cerrar sin guardar'));
-    acts.appendChild(h('button.btn.primary', { onclick: () => {
-      try {
-        const data = getValues();
-        const res = CICLO.saveEslabon(equipo.uuid, ciclo.uuid, eslabon, data, { advance: isActive });
-        ctx.onSaved(res);
-      } catch (e) { bus.emit('error', e); }
-    }}, isActive ? 'Guardar y avanzar' : 'Guardar cambios'));
-  }
-  wrap.appendChild(acts);
+  wrap.appendChild(tree);
   return wrap;
 }
 
-/* ============================================================
-   UI · forms por eslabón
-   ============================================================ */
-function renderApertura(push, snap, onChange, equipo, ciclo) {
-  let s = {
-    fechaEvento: dateInputValue(snap.fechaEvento || ciclo.apertura?.fechaEvento || ciclo.apertura?.fecha),
-    deteccion:   snap.deteccion   || ciclo.apertura?.deteccion   || 'Servicio clínico avisó',
-    descripcion: snap.descripcion || ciclo.apertura?.descripcion || '',
-    responsable: snap.responsable || ciclo.apertura?.responsable || '',
-    sigemEstado: snap.sigemEstado || ciclo.apertura?.sigemEstado || 'falta',
-    folioSigem:  snap.folioSigem  || ciclo.apertura?.folioSigem  || '',
-  };
-  const fire = () => onChange({ ...s, fechaEvento: isoFromDateInput(s.fechaEvento) });
-
-  push(row('1fr 1fr', [
-    field('Fecha real del problema *', dateCtl(s.fechaEvento, { onchange:(e)=> { s.fechaEvento = e.target.value; fire(); } })),
-    field('Cómo se detectó', selectCtl(DETECCIONES_APERTURA, s.deteccion, { onchange:(e)=> { s.deteccion = e.target.value; fire(); } })),
-  ]));
-  push(field('Descripción del problema *', textareaCtl({ rows:3, value: s.descripcion, oninput:(e)=> { s.descripcion = e.target.value; fire(); } })));
-  push(row('1fr 1fr', [
-    field('Responsable', selectTecnico(s.responsable, { onchange:(e)=> { s.responsable = e.target.value; fire(); } })),
-    field('Estado SIGEM', selectCtl([
-      { value:'falta',    label:'Falta gestionar' },
-      { value:'existe',   label:'Ya existe' },
-      { value:'noAplica', label:'No aplica' },
-    ], s.sigemEstado, { onchange:(e)=> { s.sigemEstado = e.target.value; fire(); } })),
-  ]));
-  push(field('Folio SIGEM', inputCtl({ value: s.folioSigem, placeholder:'2026-12345', oninput:(e)=> { s.folioSigem = e.target.value; fire(); } })));
-  return () => ({ ...s, fechaEvento: isoFromDateInput(s.fechaEvento) });
+/** Helper: el usuario actual del sistema (identificado en boot). */
+function usuarioActual() {
+  try { return localStorage.getItem('pmp.v3.usuario') || ''; } catch { return ''; }
+}
+function setUsuarioActual(u) {
+  try { localStorage.setItem('pmp.v3.usuario', u || ''); } catch {}
 }
 
-function renderDiagnostico(push, snap, onChange, ciclo) {
-  let s = {
-    fechaEvento: dateInputValue(snap.fechaEvento || ciclo.diagnostico?.fechaEvento || todayISO()),
-    obs:         snap.obs         || ciclo.diagnostico?.obs || '',
-    ruta:        snap.ruta        || ciclo.ruta || '',
-    enGarantia:  snap.enGarantia !== undefined ? snap.enGarantia : (ciclo.enGarantia ?? false),
-  };
-  const fire = () => onChange({ ...s, fechaEvento: isoFromDateInput(s.fechaEvento) });
-
-  push(row('1fr 1fr', [
-    field('Fecha del diagnóstico *', dateCtl(s.fechaEvento, { onchange:(e)=> { s.fechaEvento = e.target.value; fire(); } })),
-    field('Ruta de resolución *', selectCtl([{ value:'', label:'Seleccionar ruta…' }, ...RUTAS_OPCIONES], s.ruta, { onchange:(e)=> { s.ruta = e.target.value; fire(); } }), 'Determina los eslabones siguientes.'),
-  ]));
-  push(field('Observación del diagnóstico', textareaCtl({ rows:3, value: s.obs, oninput:(e)=> { s.obs = e.target.value; fire(); } })));
-  push(h('label', { style:{ display:'flex', alignItems:'center', gap:'8px', padding:'8px 0', fontSize:'12.5px' } }, [
-    h('input', { type:'checkbox', checked: s.enGarantia, onchange:(e)=> { s.enGarantia = e.target.checked; fire(); } }),
-    h('span', 'Resolver por garantía con proveedor (reemplaza Compra por Garantía).'),
-  ]));
-  return () => {
-    if (!s.ruta) throw new Error('Elegí una ruta de resolución.');
-    return { ...s, fechaEvento: isoFromDateInput(s.fechaEvento) };
-  };
+/** Modal de identificación de usuario (primera carga ever, o vía Configuración). */
+function abrirModalIdentificarUsuario(opts={}) {
+  let elegido = usuarioActual() || '';
+  UI.modal({
+    title: '¿Quién sos?',
+    sub: opts.sub || 'Elegí tu nombre de la lista oficial del SEC. Esto se usa para pre-rellenar formularios y filtrar "mis pendientes".',
+    size: 'sm',
+    critical: !usuarioActual(),
+    content: (body) => {
+      body.appendChild(field('Tu nombre *', selectTecnico(elegido, { onchange: (e) => elegido = e.target.value })));
+    },
+    footer: (f, { close }) => {
+      if (usuarioActual()) f.appendChild(h('button.btn.ghost', { onclick: close }, 'Cancelar'));
+      f.appendChild(h('button.btn.primary', { onclick: () => {
+        if (!elegido) { bus.emit('error', new Error('Elegí un nombre de la lista.')); return; }
+        setUsuarioActual(elegido);
+        UI.toast(`Identificado como ${elegido}.`, 'success');
+        close('save');
+        // Tras identificarte por primera vez, mostrar la bienvenida del día.
+        setTimeout(() => abrirModalBienvenida(), 200);
+        Router.go(STATE.view, STATE.viewParams);
+      } }, [ h('i.ti.ti-user-check'), 'Confirmar' ]));
+    },
+  });
 }
 
-function renderCompra(push, snap, onChange) {
-  let s = {
-    fechaEvento: dateInputValue(snap.fechaEvento || todayISO()),
-    estado:      snap.estado || 'en_gestion',
-    empresa:     snap.empresa || '',
-    folioOC:     snap.folioOC || '',
-    monto:       snap.monto || '',
-  };
-  const fire = () => onChange({ ...s, fechaEvento: isoFromDateInput(s.fechaEvento) });
-  push(row('1fr 1fr', [
-    field('Fecha de la gestión *', dateCtl(s.fechaEvento, { onchange:(e)=> { s.fechaEvento = e.target.value; fire(); } })),
-    field('Estado de la compra *', selectCtl([
-      { value:'en_gestion', label:'En gestión' },
-      { value:'aprobada',   label:'Aprobada' },
-      { value:'rechazada',  label:'Rechazada (cierra ciclo)' },
-    ], s.estado, { onchange:(e)=> { s.estado = e.target.value; fire(); } })),
-  ]));
-  push(row('1fr 1fr', [
-    field('Empresa proveedora', inputCtl({ value: s.empresa, oninput:(e)=> { s.empresa = e.target.value; fire(); } })),
-    field('Folio OC', inputCtl({ value: s.folioOC, oninput:(e)=> { s.folioOC = e.target.value; fire(); } })),
-  ]));
-  push(field('Monto (CLP)', inputCtl({ type:'number', min:0, value: s.monto, oninput:(e)=> { s.monto = e.target.value; fire(); } })));
-  return () => ({ ...s, fechaEvento: isoFromDateInput(s.fechaEvento), monto: s.monto ? Number(s.monto) : null });
+/** Modal de bienvenida diaria — primera apertura del día. */
+function abrirModalBienvenida() {
+  const ahora = new Date();
+  const hora = ahora.getHours();
+  const saludo = hora < 12 ? 'Buenos días' : hora < 19 ? 'Buenas tardes' : 'Buenas noches';
+  const nombre = (usuarioActual() || '').split(' ')[0] || 'colega';
+  const fechaTxt = ahora.toLocaleDateString('es-CL', { weekday:'long', year:'numeric', month:'long', day:'numeric' });
+
+  // KPIs
+  const yo = usuarioActual();
+  const hoyMs = new Date(); hoyMs.setHours(23,59,59,999);
+  const misHoy = STATE.pendientes.filter(p => p.estado !== 'Cerrado' && p.asignado === yo && p.vence && new Date(p.vence) <= hoyMs).length;
+  const vencidos = STATE.pendientes.filter(p => p.estado !== 'Cerrado' && p.vence && new Date(p.vence) < new Date()).length;
+  const eqVencidos30 = STATE.equipos.filter(e => ESTADOS_NO_OPERATIVOS.includes(e.estado) && e.estadoDesde && diasEnEstadoActual(e) > 30).length;
+  const ciclosAb = CICLO.todosAbiertos().length;
+
+  // Recordatorios
+  const sinAsignar = STATE.pendientes.filter(p => p.estado !== 'Cerrado' && !p.asignado).length;
+  const recepNoReparados = STATE.equipos.filter(e => e.estado === 'Recepcionado' && e.estadoDesde && diasEnEstadoActual(e) > 5);
+  const solicSinAvance = (() => {
+    let count = 0;
+    STATE.equipos.forEach(e => (e.correctivos || []).forEach(c => {
+      if (c.abierto && c.solicitud && (c.envios || []).length === 0) {
+        const dias = Math.floor((Date.now() - new Date(c.solicitud.fechaEvento).getTime()) / 86400000);
+        if (dias > 7) count++;
+      }
+    }));
+    return count;
+  })();
+
+  // Maestro
+  const sess = STATE.session || {};
+  const cargaHoy = sess.fechaCarga && sess.fechaCarga.slice(0,10) === ahora.toISOString().slice(0,10);
+
+  UI.modal({
+    title: `${saludo}, ${nombre}.`,
+    sub: `Hoy es ${fechaTxt}.`,
+    size: 'md',
+    critical: true,
+    content: (body) => {
+      // Card maestro
+      const maestroCard = h('div.card', { style:{marginBottom:'14px'} });
+      if (cargaHoy) {
+        maestroCard.appendChild(h('div.banner.success', [
+          h('i.ti.ti-circle-check'),
+          h('div.grow', `Maestro ya revisado hoy (${fmt.datetime(sess.fechaCarga)}).`),
+          h('button.btn.sm', { onclick: () => { document.querySelector('#modals .backdrop')?.querySelector('.close')?.click(); setTimeout(() => handleImportMaestro(), 100); } }, 'Volver a comparar'),
+        ]));
+      } else {
+        maestroCard.appendChild(h('div', { style:{display:'flex', alignItems:'center', gap:'10px'} }, [
+          h('i.ti.ti-file-spreadsheet', { style:{fontSize:'24px', color:'var(--info)'} }),
+          h('div', { style:{flex:1} }, [
+            h('div', { style:{fontWeight:500, fontSize:'13px'} }, 'Revisar maestro del día'),
+            h('div', { style:{color:'var(--ink-3)', fontSize:'12px'} }, 'Cargá el Excel maestro para detectar cambios respecto al último import.'),
+          ]),
+          h('button.btn.primary.sm', { onclick: () => { document.querySelector('#modals .backdrop')?.querySelector('.close')?.click(); setTimeout(() => handleImportMaestro(), 100); } }, [ h('i.ti.ti-upload'), 'Cargar maestro' ]),
+        ]));
+      }
+      body.appendChild(maestroCard);
+
+      // KPIs
+      body.appendChild(h('div', { style:{fontSize:'12px', color:'var(--ink-3)', textTransform:'uppercase', letterSpacing:'.04em', marginBottom:'6px', fontWeight:500} }, 'Resumen del día'));
+      body.appendChild(h('div.kpi-grid', { style:{marginBottom:'14px'} }, [
+        kpiCard({ label:'Mis pendientes hoy', value: fmt.number(misHoy), kind: misHoy ? 'warning' : 'muted', onclick: () => { cerrarBienvenida(); UI_PEND.filtros = { estado:'', asignado: yo, desde:'', hasta: new Date().toISOString().slice(0,10) }; Router.go('tareas'); } }),
+        kpiCard({ label:'Pendientes vencidos', value: fmt.number(vencidos), kind: vencidos ? 'danger' : 'muted', onclick: () => { cerrarBienvenida(); UI_PEND.filtros = { estado:'', asignado:'', desde:'', hasta: new Date().toISOString().slice(0,10) }; Router.go('tareas'); } }),
+        kpiCard({ label:'Equipos >30d crítico', value: fmt.number(eqVencidos30), kind: eqVencidos30 ? 'danger' : 'muted', onclick: () => { cerrarBienvenida(); Router.go('inv', { tiempoEstado: '30' }); } }),
+        kpiCard({ label:'Ciclos correctivos', value: fmt.number(ciclosAb), kind: ciclosAb ? 'info' : 'muted', onclick: () => { cerrarBienvenida(); Router.go('ciclos'); } }),
+      ]));
+
+      // Recordatorios
+      if (sinAsignar || recepNoReparados.length || solicSinAvance) {
+        body.appendChild(h('div', { style:{fontSize:'12px', color:'var(--ink-3)', textTransform:'uppercase', letterSpacing:'.04em', marginBottom:'6px', fontWeight:500} }, 'Recordatorios'));
+        const items = h('ul', { style:{margin:'0 0 12px 0', paddingLeft:'18px', fontSize:'12.5px'} });
+        if (sinAsignar) items.appendChild(h('li', { style:{cursor:'pointer', color:'var(--warning)'}, onclick: () => { cerrarBienvenida(); UI_PEND.filtros = { estado:'', asignado:'__SIN_ASIGNAR__', desde:'', hasta:'' }; Router.go('tareas'); } }, `⚠ ${sinAsignar} pendiente${sinAsignar>1?'s':''} sin responsable asignado`));
+        if (recepNoReparados.length) {
+          const eq0 = recepNoReparados[0];
+          items.appendChild(h('li', null, `📦 ${recepNoReparados.length} equipo${recepNoReparados.length>1?'s':''} recepcionado${recepNoReparados.length>1?'s':''} sin reparar hace >5 días (p. ej. ${eq0.nombre})`));
+        }
+        if (solicSinAvance) items.appendChild(h('li', null, `📝 ${solicSinAvance} solicitud${solicSinAvance>1?'es':''} abierta${solicSinAvance>1?'s':''} sin avance hace >7 días`));
+        body.appendChild(items);
+      }
+    },
+    footer: (f, { close }) => {
+      f.appendChild(h('button.btn.ghost', { onclick: () => { cerrarBienvenida(true); } }, 'Saltar'));
+      f.appendChild(h('button.btn.primary', { onclick: () => { cerrarBienvenida(true); } }, [ h('i.ti.ti-arrow-right-bar'), 'Empezar' ]));
+    },
+  });
+
+  function cerrarBienvenida(persistir=true) {
+    if (persistir) {
+      try { localStorage.setItem('pmp.v3.ultimaApertura', ahora.toISOString().slice(0,10)); } catch {}
+    }
+    document.querySelectorAll('#modals .backdrop').forEach(b => {
+      const closeBtn = b.querySelector('.modal-h .close');
+      if (closeBtn) closeBtn.click();
+    });
+  }
 }
 
-function renderGarantia(push, snap, onChange) {
-  let s = {
-    fechaEvento:    dateInputValue(snap.fechaEvento || todayISO()),
-    estado:         snap.estado || 'en_gestion',
-    proveedor:      snap.proveedor || '',
-    nroCaso:        snap.nroCaso || '',
-    fechaEstimada:  dateInputValue(snap.fechaEstimada),
-    notas:          snap.notas || '',
-  };
-  const fire = () => onChange({ ...s, fechaEvento: isoFromDateInput(s.fechaEvento), fechaEstimada: isoFromDateInput(s.fechaEstimada) });
-  push(row('1fr 1fr', [
-    field('Fecha de la gestión *', dateCtl(s.fechaEvento, { onchange:(e)=> { s.fechaEvento = e.target.value; fire(); } })),
-    field('Estado de la garantía *', selectCtl([
-      { value:'en_gestion', label:'En gestión' },
-      { value:'aprobada',   label:'Aprobada' },
-      { value:'denegada',   label:'Denegada (cierra ciclo)' },
-    ], s.estado, { onchange:(e)=> { s.estado = e.target.value; fire(); } })),
-  ]));
-  push(row('1fr 1fr', [
-    field('Proveedor', inputCtl({ value: s.proveedor, oninput:(e)=> { s.proveedor = e.target.value; fire(); } })),
-    field('N° de caso', inputCtl({ value: s.nroCaso, oninput:(e)=> { s.nroCaso = e.target.value; fire(); } })),
-  ]));
-  push(row('1fr 1fr', [
-    field('Fecha estimada de respuesta', dateCtl(s.fechaEstimada, { onchange:(e)=> { s.fechaEstimada = e.target.value; fire(); } })),
-    h('div'),
-  ]));
-  push(field('Notas', textareaCtl({ rows:2, value: s.notas, oninput:(e)=> { s.notas = e.target.value; fire(); } })));
-  return () => ({ ...s, fechaEvento: isoFromDateInput(s.fechaEvento), fechaEstimada: s.fechaEstimada ? isoFromDateInput(s.fechaEstimada) : null });
+/**
+ * Pendiente automático cuando un equipo lleva >30 días en estado crítico
+ * (NoOperativo / ServicioTecnico / Recepcionado). Idempotente: dedup por
+ * `meta.estadoDesde` para no duplicar al recalcular.
+ */
+function revisarEquiposVencidos() {
+  let creados = 0;
+  STATE.equipos.forEach(e => {
+    if (!ESTADOS_NO_OPERATIVOS.includes(e.estado) || !e.estadoDesde) return;
+    const dias = diasEnEstadoActual(e);
+    if (dias == null || dias <= 30) return;
+    const tipoAlerta = '30d-' + e.estado;
+    const yaExiste = STATE.pendientes.some(p =>
+      p.estado !== 'Cerrado' && p.meta && p.meta.tipoAlerta === tipoAlerta &&
+      p.meta.equipoUuid === e.uuid && p.meta.estadoDesde === e.estadoDesde
+    );
+    if (yaExiste) return;
+    // Buscar el último ESTADO para sacar responsable
+    const ultEv = (e.eventos || []).filter(ev => ev.tipo === 'ESTADO').sort((a,b) => new Date(b.ts) - new Date(a.ts))[0];
+    const asignado = ultEv?.payload?.responsable || '';
+    const vence = addBusinessDays(new Date(), 5).toISOString();
+    PENDIENTE.crear({
+      tipo: 'equipo-vencido-30d',
+      descripcion: `Equipo ${e.nombre || ''} lleva ${Math.floor(dias)} días en estado ${ESTADO_LABEL[e.estado]}. Revisar avance.`,
+      equipoUuid: e.uuid,
+      asignado,
+      vence,
+      meta: { tipoAlerta, equipoUuid: e.uuid, estadoDesde: e.estadoDesde },
+    });
+    creados++;
+  });
+  if (creados) console.info('[revisarEquiposVencidos] pendientes creados:', creados);
+  return creados;
 }
 
-function renderEnvio(push, snap, onChange) {
-  let s = {
-    fechaEvento:  dateInputValue(snap.fechaEvento || todayISO()),
-    folioEnvio:   snap.folioEnvio || '',
-    empresa:      snap.empresa || '',
-    responsable:  snap.responsable || '',
-  };
-  const fire = () => onChange({ ...s, fechaEvento: isoFromDateInput(s.fechaEvento) });
-  push(row('1fr 1fr', [
-    field('Fecha del envío *', dateCtl(s.fechaEvento, { onchange:(e)=> { s.fechaEvento = e.target.value; fire(); } })),
-    field('Empresa de transporte / proveedor', inputCtl({ value: s.empresa, oninput:(e)=> { s.empresa = e.target.value; fire(); } })),
-  ]));
-  push(row('1fr 1fr', [
-    field('Folio de envío', inputCtl({ value: s.folioEnvio, oninput:(e)=> { s.folioEnvio = e.target.value; fire(); } })),
-    field('Responsable del envío', selectTecnico(s.responsable, { onchange:(e)=> { s.responsable = e.target.value; fire(); } })),
-  ]));
-  push(h('div.banner.info', [ h('i.ti.ti-info-circle'), h('div.grow', 'Al guardar, el equipo pasa a En Servicio Técnico con esta fecha.') ]));
-  return () => {
-    if (!s.empresa.trim()) throw new Error('Indicá la empresa.');
-    return { ...s, fechaEvento: isoFromDateInput(s.fechaEvento) };
-  };
+/** Actualiza badges del sidebar: total pendientes abiertos + vencidos asignados a mí. */
+function actualizarBadgesPendientes() {
+  const yo = usuarioActual();
+  const abiertos = STATE.pendientes.filter(p => p.estado !== 'Cerrado').length;
+  const misVencidos = STATE.pendientes.filter(p =>
+    p.estado !== 'Cerrado' && p.asignado === yo && p.vence && new Date(p.vence) < new Date()
+  ).length;
+  const navItem = document.querySelector('#nav .nav-item[data-view="tareas"]');
+  if (!navItem) return;
+  // Limpiar badges previos
+  navItem.querySelectorAll('.badge-pend').forEach(b => b.remove());
+  const cont = h('span', { style:{marginLeft:'auto', display:'flex', gap:'4px'} });
+  cont.className = 'badge-pend';
+  if (abiertos) cont.appendChild(h('span.pill.info', { style:{fontSize:'10px', padding:'1px 5px'} }, String(abiertos)));
+  if (misVencidos) cont.appendChild(h('span.pill.danger', { style:{fontSize:'10px', padding:'1px 5px'} }, String(misVencidos)));
+  navItem.appendChild(cont);
 }
 
-function renderRecepcion(push, snap, onChange) {
-  let s = {
-    fechaEvento: dateInputValue(snap.fechaEvento || todayISO()),
-    funciono:    snap.funciono !== undefined ? snap.funciono : true,
-    obs:         snap.obs || '',
-  };
-  const fire = () => onChange({ ...s, fechaEvento: isoFromDateInput(s.fechaEvento) });
-  push(row('1fr 1fr', [
-    field('Fecha de recepción *', dateCtl(s.fechaEvento, { onchange:(e)=> { s.fechaEvento = e.target.value; fire(); } })),
-    field('¿Llegó funcionando? *', selectCtl([
-      { value:'true',  label:'Sí, funciona — pasar a Reparación / cierre' },
-      { value:'false', label:'No funciona — re-enviar (otro envío)' },
-    ], String(!!s.funciono), { onchange:(e)=> { s.funciono = e.target.value === 'true'; fire(); } })),
-  ]));
-  push(field('Observación', textareaCtl({ rows:2, value: s.obs, oninput:(e)=> { s.obs = e.target.value; fire(); } })));
-  return () => ({ ...s, fechaEvento: isoFromDateInput(s.fechaEvento) });
-}
-
-function renderReparacion(push, snap, onChange) {
-  let s = {
-    fechaEvento: dateInputValue(snap.fechaEvento || todayISO()),
-    obs:         snap.obs || '',
-  };
-  const fire = () => onChange({ ...s, fechaEvento: isoFromDateInput(s.fechaEvento) });
-  push(field('Fecha de la reparación *', dateCtl(s.fechaEvento, { onchange:(e)=> { s.fechaEvento = e.target.value; fire(); } })));
-  push(field('Observación / resultado', textareaCtl({ rows:3, value: s.obs, oninput:(e)=> { s.obs = e.target.value; fire(); } })));
-  push(h('div.banner.info', [ h('i.ti.ti-info-circle'), h('div.grow', 'Al guardar, el ciclo se cierra y el equipo vuelve a Operativo con esta fecha.') ]));
-  return () => ({ ...s, fechaEvento: isoFromDateInput(s.fechaEvento) });
-}
 
 /* ============================================================
    DOMAIN · contactos por servicio
@@ -5044,6 +5429,8 @@ function renderNav() {
     main.appendChild(item);
   });
   nav.appendChild(main);
+  // Badges R6 en "Pendientes"
+  try { actualizarBadgesPendientes(); } catch {}
 }
 
 function renderSessionChip() {
@@ -5086,24 +5473,26 @@ VIEWS.dash = {
   render(root) {
     const total   = STATE.equipos.length;
     const byEst   = EQ.countByEstado();
-    const garan   = EQ.garantiasActivas().length;
-    const ciclos  = EQ.ciclosAbiertos().length;
+    const ciclos  = CICLO.todosAbiertos().length;
     const pendAb  = STATE.pendientes.filter(p => p.estado !== 'Cerrado').length;
+    const hoyMs = new Date(); hoyMs.setHours(23,59,59,999);
+    const yo = usuarioActual();
+    const misHoy = STATE.pendientes.filter(p => p.estado !== 'Cerrado' && p.asignado === yo && p.vence && new Date(p.vence) <= hoyMs).length;
     const pendVencidos = STATE.pendientes.filter(p => p.estado !== 'Cerrado' && p.vence && new Date(p.vence) < new Date()).length;
+    const sinAsignar = STATE.pendientes.filter(p => p.estado !== 'Cerrado' && !p.asignado).length;
     const now = new Date(); const mes = now.getMonth()+1;
     const mpProgramadas = STATE.equipos.reduce((s,e) => s + ((e.grilla?.[mes] === 'X' || e.grilla?.[mes] === 'R') ? 1 : 0), 0);
     const mpEjecutadas  = STATE.equipos.reduce((s,e) => s + ((e.historial||[]).some(h => h.mes===mes && h.resultado==='SI') ? 1 : 0), 0);
-    const mpPendientes  = mpProgramadas - mpEjecutadas;
-    const pctCumpl = mpProgramadas ? Math.round(mpEjecutadas/mpProgramadas*100) : 0;
+    const mpPendientes  = Math.max(0, mpProgramadas - mpEjecutadas);
 
-    // Alertas globales
-    const alertasA = STATE.equipos.flatMap(e => alertasDeEquipo(e).map(a => ({...a, equipo: e}))).slice(0, 5);
+    const noOpTotal = (byEst.NoOperativo||0) + (byEst.ServicioTecnico||0) + (byEst.Recepcionado||0);
+    const pctOper = total ? Math.round(((byEst.Operativo||0) / total) * 100) : 0;
 
     root.appendChild(viewHeader({
-      title: 'Dashboard',
+      title: yo ? `Dashboard · ${yo.split(' ')[0]}` : 'Dashboard',
       desc: total === 0
         ? 'Sin equipos cargados. Importá el maestro Excel para empezar.'
-        : `${fmt.number(total)} equipos · ${fmt.number(byEst.Operativo)} operativos`,
+        : `${fmt.number(total)} equipos · ${pctOper}% disponibilidad`,
       actions: total === 0
         ? [
             { label: 'Importar maestro', icon: 'ti-file-spreadsheet', primary: true, onclick: handleImportMaestro },
@@ -5111,7 +5500,7 @@ VIEWS.dash = {
           ]
         : [
             { label: 'Importar maestro', icon: 'ti-refresh', onclick: handleImportMaestro },
-            { label: 'Descargar backup', icon: 'ti-database-export', onclick: exportBackup },
+            { label: 'Ver bienvenida', icon: 'ti-sun', onclick: () => abrirModalBienvenida() },
           ],
     }));
 
@@ -5128,34 +5517,195 @@ VIEWS.dash = {
       return;
     }
 
-    // KPI grid
-    const kpis = h('div.kpi-grid');
-    kpis.appendChild(kpiCard({ label: 'Equipos totales', value: fmt.number(total),    onclick: () => Router.go('inv', { showSlots: true }) }));
-    kpis.appendChild(kpiCard({ label: 'Operativos',      value: fmt.number(byEst.Operativo),   kind: 'success', onclick: () => Router.go('inv', { estado: 'Operativo' }) }));
-    kpis.appendChild(kpiCard({ label: 'No operativos',   value: fmt.number(byEst.NoOperativo), kind: 'danger',  onclick: () => Router.go('inv', { estado: 'NoOperativo' }) }));
-    kpis.appendChild(kpiCard({ label: 'En servicio técn.', value: fmt.number(byEst.ServicioTecnico), kind: 'warning', onclick: () => Router.go('inv', { estado: 'ServicioTecnico' }) }));
-    kpis.appendChild(kpiCard({ label: 'En garantía',     value: fmt.number(garan),  kind: 'purple',  onclick: () => Router.go('inv', { garantia: 'si' }) }));
-    kpis.appendChild(kpiCard({ label: 'Ciclos abiertos', value: fmt.number(ciclos), kind: ciclos ? 'info' : 'muted', onclick: () => Router.go('ciclos') }));
-    kpis.appendChild(kpiCard({ label: `MP ${MESES[mes-1]} cumplimiento`, value: `${pctCumpl}%`, kind: pctCumpl >= 80 ? 'success' : pctCumpl >= 50 ? 'warning' : 'danger', onclick: () => Router.go('pmp') }));
-    kpis.appendChild(kpiCard({ label: `MP ${MESES[mes-1]} pendientes`,   value: `${fmt.number(mpPendientes)} / ${fmt.number(mpProgramadas)}`, kind: mpPendientes ? 'warning' : 'success', onclick: () => Router.go('pmp') }));
-    kpis.appendChild(kpiCard({ label: 'Pendientes abiertos', value: fmt.number(pendAb),       kind: pendVencidos ? 'danger' : (pendAb ? 'warning' : 'muted'), onclick: () => Router.go('tareas') }));
+    // Banner "sin asignar" persistente
+    if (sinAsignar > 0) {
+      root.appendChild(h('div.banner.warning', { style:{ marginBottom:'14px' } }, [
+        h('i.ti.ti-alert-triangle'),
+        h('div.grow', `${sinAsignar} pendiente${sinAsignar>1?'s':''} sin responsable asignado — hacer seguimiento.`),
+        h('button.btn.sm', { onclick: () => { UI_PEND.filtros = { estado:'', asignado:'__SIN_ASIGNAR__', desde:'', hasta:'' }; Router.go('tareas'); } }, [ h('i.ti.ti-arrow-right'), 'Revisar' ]),
+      ]));
+    }
+
+    // === Fila 1 — KPIs operativos ===
+    root.appendChild(h('div', { style:{fontSize:'11.5px', color:'var(--ink-3)', textTransform:'uppercase', letterSpacing:'.04em', marginBottom:'8px', fontWeight:500} }, 'Estado operacional'));
+    const kpis = h('div.kpi-grid', { style:{marginBottom:'18px'} });
+    kpis.appendChild(kpiCard({ label: `Operativos / ${fmt.number(total)}`, value: `${fmt.number(byEst.Operativo||0)} · ${pctOper}%`, kind: pctOper >= 80 ? 'success' : pctOper >= 50 ? 'warning' : 'danger', onclick: () => Router.go('inv', { estado: 'Operativo' }) }));
+    kpis.appendChild(kpiCard({ label: 'No operativos', value: fmt.number(noOpTotal), kind: noOpTotal ? 'danger' : 'muted', onclick: () => Router.go('inv', { estado: 'NoOperativo' }) }));
+    kpis.appendChild(kpiCard({ label: 'Ciclos correctivos', value: fmt.number(ciclos), kind: ciclos ? 'info' : 'muted', onclick: () => Router.go('ciclos') }));
+    kpis.appendChild(kpiCard({ label: 'Mis pendientes hoy', value: fmt.number(misHoy), kind: misHoy ? 'warning' : 'muted', onclick: () => { UI_PEND.filtros = { estado:'', asignado: yo || '', desde:'', hasta: new Date().toISOString().slice(0,10) }; Router.go('tareas'); } }));
+    kpis.appendChild(kpiCard({ label: 'Pendientes vencidos', value: fmt.number(pendVencidos), kind: pendVencidos ? 'danger' : 'muted', onclick: () => { UI_PEND.filtros = { estado:'', asignado:'', desde:'', hasta: new Date().toISOString().slice(0,10) }; Router.go('tareas'); } }));
     root.appendChild(kpis);
 
-    // Alertas globales destacadas
-    if (alertasA.length) {
-      const sec = h('div.section');
-      sec.appendChild(h('h3', `Atenciones (${alertasA.length})`));
-      alertasA.forEach(a => {
-        sec.appendChild(h(`div.banner.${a.kind}`, { style:{ marginBottom:'6px' } }, [
-          h('i.ti', { class:'ti ' + (a.icon || 'ti-alert-circle') }),
-          h('div.grow', [
-            h('span', { style:{cursor:'pointer', fontWeight:500}, onclick: () => openFicha(a.equipo.uuid) }, a.equipo.nombre || '(sin nombre)'),
-            ' · ', a.text,
+    // === Fila 2 — Atenciones críticas ===
+    root.appendChild(h('div', { style:{fontSize:'11.5px', color:'var(--ink-3)', textTransform:'uppercase', letterSpacing:'.04em', marginBottom:'8px', fontWeight:500} }, 'Atenciones críticas'));
+    const equiposCritico30 = STATE.equipos
+      .filter(e => ESTADOS_NO_OPERATIVOS.includes(e.estado) && e.estadoDesde && diasEnEstadoActual(e) > 30)
+      .sort((a,b) => diasEnEstadoActual(b) - diasEnEstadoActual(a))
+      .slice(0, 5);
+    const ciclosSinAvance = (() => {
+      const out = [];
+      STATE.equipos.forEach(e => (e.correctivos || []).forEach(c => {
+        if (!c.abierto || !c.solicitud) return;
+        const ultActividad = Math.max(
+          new Date(c.solicitud.fechaEvento).getTime(),
+          ...(c.envios||[]).map(x => new Date(x.fechaEvento).getTime()),
+          ...(c.recepciones||[]).map(x => new Date(x.fechaEvento).getTime()),
+        );
+        const dias = Math.floor((Date.now() - ultActividad) / 86400000);
+        if (dias > 7) out.push({ equipo: e, ciclo: c, dias });
+      }));
+      return out.sort((a,b) => b.dias - a.dias).slice(0, 5);
+    })();
+
+    const atencionesGrid = h('div', { style:{display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(280px,1fr))', gap:'12px', marginBottom:'18px'} });
+    // Card 1: equipos >30d
+    atencionesGrid.appendChild((() => {
+      const card = h('div.card');
+      card.appendChild(h('div', { style:{display:'flex', alignItems:'center', gap:'8px', marginBottom:'8px'} }, [
+        h('i.ti.ti-alert-octagon', { style:{color:'var(--danger)', fontSize:'18px'} }),
+        h('div', { style:{fontWeight:500, fontSize:'13px'} }, `Equipos >30 días en estado crítico`),
+        h('span.pill.danger', { style:{marginLeft:'auto'} }, String(equiposCritico30.length)),
+      ]));
+      if (!equiposCritico30.length) {
+        card.appendChild(h('div', { style:{color:'var(--ink-3)', fontSize:'12px'} }, 'Sin equipos en alerta.'));
+      } else {
+        equiposCritico30.forEach(e => {
+          card.appendChild(h('div', {
+            style:{padding:'5px 0', borderTop:'.5px solid var(--line)', fontSize:'12px', cursor:'pointer', display:'flex', gap:'8px', alignItems:'center'},
+            onclick: () => openFicha(e.uuid),
+          }, [
+            h('div', { style:{flex:1, minWidth:0} }, [
+              h('div', { style:{overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'} }, e.nombre || '—'),
+              h('div', { style:{color:'var(--ink-3)', fontSize:'11px'} }, ESTADO_LABEL[e.estado]),
+            ]),
+            h('span.pill.danger', { style:{fontSize:'11px'} }, `${Math.floor(diasEnEstadoActual(e))}d`),
+          ]));
+        });
+      }
+      return card;
+    })());
+    // Card 2: ciclos sin avance
+    atencionesGrid.appendChild((() => {
+      const card = h('div.card');
+      card.appendChild(h('div', { style:{display:'flex', alignItems:'center', gap:'8px', marginBottom:'8px'} }, [
+        h('i.ti.ti-clock-pause', { style:{color:'var(--warning)', fontSize:'18px'} }),
+        h('div', { style:{fontWeight:500, fontSize:'13px'} }, `Ciclos sin avance >7 días`),
+        h('span.pill.warning', { style:{marginLeft:'auto'} }, String(ciclosSinAvance.length)),
+      ]));
+      if (!ciclosSinAvance.length) {
+        card.appendChild(h('div', { style:{color:'var(--ink-3)', fontSize:'12px'} }, 'Todos los ciclos con avance reciente.'));
+      } else {
+        ciclosSinAvance.forEach(({equipo, ciclo, dias}) => {
+          card.appendChild(h('div', {
+            style:{padding:'5px 0', borderTop:'.5px solid var(--line)', fontSize:'12px', cursor:'pointer', display:'flex', gap:'8px', alignItems:'center'},
+            onclick: () => openFicha(equipo.uuid),
+          }, [
+            h('div', { style:{flex:1, minWidth:0} }, [
+              h('div', { style:{overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'} }, equipo.nombre || '—'),
+              h('div', { style:{color:'var(--ink-3)', fontSize:'11px'} }, `Folio ${ciclo.solicitud?.folioSigem || '—'}`),
+            ]),
+            h('span.pill.warning', { style:{fontSize:'11px'} }, `${dias}d`),
+          ]));
+        });
+      }
+      return card;
+    })());
+    // Card 3: MPs pendientes del mes
+    atencionesGrid.appendChild((() => {
+      const card = h('div.card');
+      card.appendChild(h('div', { style:{display:'flex', alignItems:'center', gap:'8px', marginBottom:'8px'} }, [
+        h('i.ti.ti-calendar-stats', { style:{color:'var(--info)', fontSize:'18px'} }),
+        h('div', { style:{fontWeight:500, fontSize:'13px'} }, `MP pendientes ${MESES[mes-1]}`),
+      ]));
+      card.appendChild(h('div', { style:{fontSize:'32px', fontWeight:500, lineHeight:1.1, color: mpPendientes ? 'var(--warning)' : 'var(--success)'} }, fmt.number(mpPendientes)));
+      card.appendChild(h('div', { style:{fontSize:'11.5px', color:'var(--ink-3)', marginTop:'4px'} }, `de ${fmt.number(mpProgramadas)} programadas · ${mpProgramadas ? Math.round(mpEjecutadas/mpProgramadas*100) : 0}% cumplimiento`));
+      card.appendChild(h('button.btn.sm', { style:{marginTop:'10px'}, onclick: () => Router.go('pmp') }, [ h('i.ti.ti-arrow-right'), 'Ver lista' ]));
+      return card;
+    })());
+    root.appendChild(atencionesGrid);
+
+    // === Fila 3 — Estado del parque ===
+    root.appendChild(h('div', { style:{fontSize:'11.5px', color:'var(--ink-3)', textTransform:'uppercase', letterSpacing:'.04em', marginBottom:'8px', fontWeight:500} }, 'Distribución del parque'));
+    const distGrid = h('div', { style:{display:'grid', gridTemplateColumns:'1fr 1fr', gap:'12px', marginBottom:'18px'} });
+    // Por estado
+    distGrid.appendChild((() => {
+      const card = h('div.card');
+      card.appendChild(h('div', { style:{fontWeight:500, fontSize:'13px', marginBottom:'10px'} }, 'Por estado'));
+      ESTADOS.forEach(est => {
+        const n = byEst[est] || 0;
+        if (!n) return;
+        const pct = Math.round((n / total) * 100);
+        card.appendChild(h('div', { style:{display:'flex', alignItems:'center', gap:'8px', padding:'4px 0', cursor:'pointer', fontSize:'12px'}, onclick: () => Router.go('inv', { estado: est }) }, [
+          h('span', { style:{minWidth:'140px'} }, ESTADO_LABEL[est]),
+          h('div', { style:{flex:1, height:'8px', background:'var(--paper-3)', borderRadius:'4px', overflow:'hidden'} }, [
+            h('div', { style:{height:'100%', width: pct + '%', background:`var(--${ESTADO_PILL[est] || 'info'})`} }),
           ]),
+          h('span', { style:{minWidth:'70px', textAlign:'right', color:'var(--ink-2)'} }, `${n} · ${pct}%`),
         ]));
       });
-      root.appendChild(sec);
-    }
+      return card;
+    })());
+    // Por familia (top 10 con más equipos no-op)
+    distGrid.appendChild((() => {
+      const card = h('div.card');
+      card.appendChild(h('div', { style:{fontWeight:500, fontSize:'13px', marginBottom:'10px'} }, 'Top familias con más equipos no-operativos'));
+      const noOpEq = STATE.equipos.filter(e => ESTADOS_NO_OPERATIVOS.includes(e.estado));
+      const byFam = {};
+      noOpEq.forEach(e => { byFam[e.fam || '(sin familia)'] = (byFam[e.fam || '(sin familia)'] || 0) + 1; });
+      const tops = Object.entries(byFam).sort((a,b) => b[1] - a[1]).slice(0, 10);
+      if (!tops.length) {
+        card.appendChild(h('div', { style:{color:'var(--ink-3)', fontSize:'12px'} }, 'Sin equipos no operativos.'));
+      } else {
+        const max = tops[0][1];
+        tops.forEach(([fam, n]) => {
+          card.appendChild(h('div', { style:{display:'flex', alignItems:'center', gap:'8px', padding:'4px 0', cursor:'pointer', fontSize:'12px'}, onclick: () => Router.go('inv', { familia: fam, estado: 'NoOperativo' }) }, [
+            h('span', { style:{minWidth:'140px', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'} }, fam),
+            h('div', { style:{flex:1, height:'8px', background:'var(--paper-3)', borderRadius:'4px', overflow:'hidden'} }, [
+              h('div', { style:{height:'100%', width: Math.round((n/max)*100) + '%', background:'var(--danger)'} }),
+            ]),
+            h('span', { style:{minWidth:'30px', textAlign:'right', color:'var(--ink-2)'} }, String(n)),
+          ]));
+        });
+      }
+      return card;
+    })());
+    root.appendChild(distGrid);
+
+    // === Fila 4 — Resumen ejecutivo (para jefatura) ===
+    const resumenTxt = (() => {
+      const recepN = byEst.Recepcionado || 0;
+      const stN = byEst.ServicioTecnico || 0;
+      const noOpN = byEst.NoOperativo || 0;
+      // Equipo más días en estado crítico
+      const peor = equiposCritico30[0];
+      // Empresa con más equipos en ST
+      const empresaCounts = {};
+      STATE.equipos.forEach(e => {
+        if (e.estado !== 'ServicioTecnico') return;
+        const c = (e.correctivos||[]).find(c => c.abierto);
+        const ultEnv = c && (c.envios||[]).slice(-1)[0];
+        if (ultEnv && ultEnv.empresaST) {
+          empresaCounts[ultEnv.empresaST] = (empresaCounts[ultEnv.empresaST] || 0) + 1;
+        }
+      });
+      const empresaTop = Object.entries(empresaCounts).sort((a,b) => b[1] - a[1])[0];
+      let txt = `En este momento hay ${stN} equipo${stN===1?'':'s'} en servicio técnico, ${recepN} recepcionado${recepN===1?'':'s'} pendiente${recepN===1?'':'s'} de reparación y ${noOpN} no operativo${noOpN===1?'':'s'} en servicio clínico. `;
+      if (peor) txt += `El equipo con más días en estado crítico es ${peor.nombre} (${Math.floor(diasEnEstadoActual(peor))} días en ${ESTADO_LABEL[peor.estado]}). `;
+      if (empresaTop) txt += `La empresa con más equipos en ST es ${empresaTop[0]} con ${empresaTop[1]} equipo${empresaTop[1]===1?'':'s'}.`;
+      return txt;
+    })();
+    const cardResumen = h('div.card', { style:{marginBottom:'18px'} }, [
+      h('div', { style:{display:'flex', alignItems:'center', gap:'8px', marginBottom:'8px'} }, [
+        h('i.ti.ti-clipboard-text', { style:{fontSize:'18px', color:'var(--info)'} }),
+        h('div', { style:{fontWeight:500, fontSize:'13px'} }, 'Resumen ejecutivo (para jefatura)'),
+        h('button.btn.sm.ghost', { style:{marginLeft:'auto'}, onclick: () => {
+          try { navigator.clipboard.writeText(resumenTxt); UI.toast('Texto copiado al portapapeles.', 'success'); }
+          catch { UI.toast('No se pudo copiar al portapapeles.', 'danger'); }
+        } }, [ h('i.ti.ti-copy'), 'Copiar texto' ]),
+      ]),
+      h('p', { style:{fontSize:'12.5px', color:'var(--ink-2)', margin:0, lineHeight:1.6} }, resumenTxt),
+    ]);
+    root.appendChild(cardResumen);
 
     // Reciente
     const recientes = STATE.equipos
@@ -5256,6 +5806,7 @@ VIEWS.inv = {
       title: 'Inventario',
       desc: `${fmt.number(STATE.equipos.length)} equipos cargados${showSlots ? '' : ' · slots disponibles ocultos'}`,
       actions: [
+        { label: 'Exportar filtrado', icon: 'ti-file-export', onclick: () => exportarInventarioFiltrado() },
         { label: 'Importar maestro', icon: 'ti-refresh', onclick: handleImportMaestro },
         { label: 'Backup', icon: 'ti-database-export', onclick: exportBackup },
       ],
@@ -5295,6 +5846,11 @@ VIEWS.inv = {
     const selEstado   = selectField('Estado',   '', ESTADOS.map(s => ({ value: s, label: ESTADO_LABEL[s] })), filters.estado);
     const selResp     = selectField(`Resp. ${periodoLabel(periodoFiltro)}`, '', respOpts, filters.responsable);
     const selGar      = selectField('Garantía', '', [{value:'si',label:'En garantía'},{value:'no',label:'Sin garantía'}], filters.garantia);
+    const selTiempo   = selectField('Tiempo en estado', '', [
+      { value:'7',  label:'>7 días' },
+      { value:'15', label:'>15 días' },
+      { value:'30', label:'>30 días' },
+    ], filters.tiempoEstado || '');
 
     // Toggle slots: visible siempre, default OFF, persistido
     const slotToggle = h('label', {
@@ -5318,13 +5874,14 @@ VIEWS.inv = {
         estado:   selEstado.querySelector('select').value,
         responsable: selResp.querySelector('select').value,
         garantia: selGar.querySelector('select').value,
+        tiempoEstado: selTiempo.querySelector('select').value,
         periodo: periodoFiltro,
       };
     }
 
     const toolbar = h('div.table-toolbar', [
       search,
-      h('div.right', { style:{gap:'6px'} }, [ selServicio, selFamilia, selEstado, selResp, selGar, slotToggle,
+      h('div.right', { style:{gap:'6px'} }, [ selServicio, selFamilia, selEstado, selResp, selGar, selTiempo, slotToggle,
         h('button.btn.ghost.sm', { onclick: () => Router.go('inv', {}) }, [ h('i.ti.ti-x'), 'Limpiar' ]),
       ]),
     ]);
@@ -5341,6 +5898,7 @@ VIEWS.inv = {
       <th>Marca / Modelo</th>
       <th>Frec.</th>
       <th>Estado</th>
+      <th>Días en estado</th>
     </tr></thead>`;
     const tb = h('tbody');
     tbl.appendChild(tb);
@@ -5360,11 +5918,23 @@ VIEWS.inv = {
       const f = Object.assign({}, currentParams(), { slot: showSlots ? '' : 'no' });
       const q = f.q;
       current = EQ.search(q, f);
+      // Filtro post-search: tiempo en estado
+      if (f.tiempoEstado) {
+        const umbral = Number(f.tiempoEstado);
+        current = current.filter(e => {
+          if (!ESTADOS_NO_OPERATIVOS.includes(e.estado)) return false;
+          const d = diasEnEstadoActual(e);
+          return d != null && d > umbral;
+        });
+      }
       current.sort((a,b) => (a.servicio||'').localeCompare(b.servicio||'','es') || (a.nombre||'').localeCompare(b.nombre||'','es'));
       tb.innerHTML = '';
       rendered = 0;
       const extra = showSlots ? '' : ` · ${fmt.number(STATE.equipos.filter(e => e.esSlot).length)} slots ocultos`;
       meta.textContent = `${fmt.number(current.length)} equipos coinciden con los filtros${extra}`;
+      // Guardar el snapshot filtrado para exportar
+      INV_LAST_FILTERED = current;
+      INV_LAST_FILTROS = f;
       renderMore();
     }
     function renderMore() {
@@ -5374,12 +5944,12 @@ VIEWS.inv = {
       if (rendered >= current.length) sentinel.style.display = 'none';
       else sentinel.style.display = '';
     }
-    const sentinel = h('tr', { style:{} }, [ h('td', { colspan: 9, style:{textAlign:'center', color:'var(--ink-3)', padding:'10px', fontSize:'11.5px'} }, 'Cargando más…') ]);
+    const sentinel = h('tr', { style:{} }, [ h('td', { colspan: 10, style:{textAlign:'center', color:'var(--ink-3)', padding:'10px', fontSize:'11.5px'} }, 'Cargando más…') ]);
     tb.parentNode.appendChild(sentinel); // outside tbody (browser tolerates)
     const io = new IntersectionObserver(entries => entries.forEach(en => { if (en.isIntersecting && rendered < current.length) renderMore(); }), { rootMargin: '120px' });
 
     search.querySelector('input').addEventListener('input', applyFilters);
-    [selServicio, selFamilia, selEstado, selResp, selGar].forEach(s => s.querySelector('select').addEventListener('change', applyFilters));
+    [selServicio, selFamilia, selEstado, selResp, selGar, selTiempo].forEach(s => s.querySelector('select').addEventListener('change', applyFilters));
 
     applyFilters();
     io.observe(sentinel);
@@ -5417,6 +5987,10 @@ function rowForEquipo(e) {
   tr.appendChild(h('td.truncate', { title:`${e.marca} ${e.modelo}` }, `${e.marca || ''} ${e.modelo ? '· ' + e.modelo : ''}`.trim() || '—'));
   tr.appendChild(h('td', e.frecuencia ? h('span.pill', e.frecuencia) : '—'));
   tr.appendChild(h('td', pill));
+  // Días en estado actual: visual con color
+  const d = diasEnEstadoActual(e);
+  const dPill = d == null ? '—' : h(`span.pill.${d > 30 ? 'danger' : d > 7 ? 'warning' : 'success'}`, `${Math.floor(d)}d`);
+  tr.appendChild(h('td', dPill));
   return tr;
 }
 
@@ -5491,15 +6065,12 @@ function openFicha(uuid) {
     footer: (f, { close }) => {
       f.appendChild(h('button.btn.ghost', { onclick: close }, 'Cerrar'));
       f.appendChild(h('button.btn', { onclick: () => { close(); abrirModalRegistrarMP(e); } }, [ h('i.ti.ti-calendar-plus'), 'Registrar MP' ]));
-      f.appendChild(h('button.btn', { onclick: () => { close(); abrirModalSolicitudTrabajo(e); } }, [ h('i.ti.ti-file-text'), 'Solicitud de trabajo' ]));
-      const cicloAbierto = (e.correctivos||[]).find(c => c.abierto);
-      f.appendChild(h(`button.btn.primary ${cicloAbierto?'ghost':''}`.trim(), {
-        onclick: () => {
-          close();
-          if (cicloAbierto) abrirCicloViewer(e, cicloAbierto);
-          else              abrirModalAperturaCiclo(e);
-        },
-      }, [ h('i.ti.ti-tools'), cicloAbierto ? 'Ver ciclo en curso' : 'Abrir ciclo correctivo' ]));
+      const disabledByEstado = (e.esSlot || e.estado === 'DeBaja');
+      const tip = disabledByEstado ? 'No disponible para slots o equipos de baja' : '';
+      f.appendChild(h('button.btn', { disabled: disabledByEstado, title: tip, onclick: () => { close(); abrirModalSolicitudTrabajo(e); } }, [ h('i.ti.ti-file-text'), '+ Solicitud' ]));
+      f.appendChild(h('button.btn', { disabled: disabledByEstado, title: tip, onclick: () => { close(); abrirModalEnvioST(e); } }, [ h('i.ti.ti-truck-delivery'), '+ Envío ST' ]));
+      f.appendChild(h('button.btn', { disabled: disabledByEstado, title: tip, onclick: () => { close(); abrirModalRecepcion(e); } }, [ h('i.ti.ti-package'), '+ Recepción' ]));
+      f.appendChild(h('button.btn.primary', { disabled: disabledByEstado, title: tip, onclick: () => { close(); abrirModalReparacion(e); } }, [ h('i.ti.ti-tool'), '+ Reparación' ]));
     },
   });
 }
@@ -5509,151 +6080,6 @@ function openFicha(uuid) {
  * Si el equipo está Operativo, pasa a NoOperativo con la fecha real.
  * Si ya está en otro estado, registra el evento pero NO cambia el estado.
  */
-function abrirModalSolicitudTrabajo(equipo) {
-  let snap = {
-    fechaEvento: todayISO(),
-    folioSigem: '',
-    descripcion: '',
-    responsable: '',
-  };
-  UI.modal({
-    title: 'Solicitud de trabajo',
-    sub: equipo.nombre,
-    size: 'md',
-    content: (body) => {
-      body.appendChild(h('p', { style:{margin:'0 0 12px 0', color:'var(--ink-2)', fontSize:'12.5px'} },
-        'Registra una solicitud SIGEM o aviso del servicio clínico sin activar el ciclo correctivo completo. Si más adelante el caso amerita el flujo formal, podés abrir el ciclo desde el mismo botón.'));
-      body.appendChild(row('1fr 1fr', [
-        field('Fecha real de la solicitud *', dateCtl(snap.fechaEvento, { max: todayISO(), onchange:(e)=> snap.fechaEvento = e.target.value }), 'Admite registro retroactivo. No puede ser futura.'),
-        field('Folio SIGEM', inputCtl({ value: snap.folioSigem, placeholder:'p. ej. 19-5988', oninput:(e)=> snap.folioSigem = e.target.value }), 'Opcional — si todavía no hay folio, dejalo vacío.'),
-      ]));
-      body.appendChild(field('Descripción del problema *', textareaCtl({ rows:3, value: snap.descripcion, oninput:(e)=> snap.descripcion = e.target.value })));
-      body.appendChild(field('Responsable que recibe la solicitud *', selectTecnico(snap.responsable, { onchange:(e)=> snap.responsable = e.target.value })));
-      // Aviso sobre cambio de estado
-      const aviso = equipo.estado === 'Operativo'
-        ? `Al guardar, el equipo pasa a No Operativo con la fecha indicada.`
-        : `El equipo está ${ESTADO_LABEL[equipo.estado] || equipo.estado}. Se registra la solicitud pero NO cambia de estado.`;
-      body.appendChild(h('div.banner.info', { style:{marginTop:'8px'} }, [
-        h('i.ti.ti-info-circle'),
-        h('div.grow', aviso),
-      ]));
-    },
-    footer: (f, { close }) => {
-      f.appendChild(h('button.btn.ghost', { onclick: close }, 'Cancelar'));
-      f.appendChild(h('button.btn.primary', { onclick: () => {
-        try {
-          const fechaISO = isoFromDateInput(snap.fechaEvento);
-          if (!fechaISO) throw new Error('Fecha inválida.');
-          if (new Date(fechaISO) > new Date(Date.now() + 86400000)) throw new Error('La fecha no puede ser futura.');
-          if (!snap.descripcion.trim()) throw new Error('Falta la descripción.');
-          if (!snap.responsable) throw new Error('Elegí un responsable de la lista.');
-          const folio = snap.folioSigem.trim();
-          const descTxt = `Solicitud de trabajo · Folio ${folio || '(sin folio)'}: ${snap.descripcion.trim()}`;
-          // Evento principal
-          pushEvento(equipo, {
-            tipo: 'SOLICITUD_TRABAJO',
-            ts: fechaISO,
-            payload: {
-              folioSigem: folio || null,
-              descripcion: snap.descripcion.trim(),
-              responsable: snap.responsable,
-              desc: descTxt,
-              cambioEstado: equipo.estado === 'Operativo',
-            },
-          });
-          let cambioEstado = false;
-          if (equipo.estado === 'Operativo') {
-            equipo.estado = 'NoOperativo';
-            equipo.estadoDesde = fechaISO;
-            pushEvento(equipo, {
-              tipo: 'ESTADO',
-              ts: fechaISO,
-              payload: { de: 'Operativo', a: 'NoOperativo', origen: 'SOLICITUD_TRABAJO' },
-            });
-            cambioEstado = true;
-          }
-          persist('equipos');
-          UI.toast(cambioEstado
-            ? `Solicitud registrada · equipo marcado No Operativo (${fmt.date(fechaISO)}).`
-            : `Solicitud registrada · estado del equipo sin cambios.`,
-            'success', { duration: 5000 });
-          close('save');
-          if (STATE.view) Router.go(STATE.view, STATE.viewParams);
-        } catch (e) { bus.emit('error', e); }
-      }}, [ h('i.ti.ti-device-floppy'), 'Registrar solicitud' ]));
-    },
-  });
-}
-
-function abrirModalAperturaCiclo(equipo) {
-  // Versión mínima It.2: redirige a flujo simple "crear ciclo en diagnóstico" sin causal previa.
-  // La UI completa por eslabón llega en It.3.
-  let snap = {
-    fechaEvento: todayISO(),
-    deteccion: 'Servicio clínico avisó',
-    descripcion: '',
-    responsable: '',
-    sigemEstado: 'falta',
-    folioSigem: '',
-  };
-  UI.modal({
-    title: 'Apertura de ciclo correctivo',
-    sub: equipo.nombre,
-    size: 'md',
-    content: (body) => {
-      body.appendChild(h('p', { style:{margin:'0 0 12px 0', color:'var(--ink-2)', fontSize:'12.5px'} },
-        'El equipo pasa a No Operativo con la fecha real del problema. Si todavía no hay folio SIGEM, se crea un pendiente para gestionarlo.'));
-      body.appendChild(row('1fr 1fr', [
-        field('Fecha real del problema *', dateCtl(snap.fechaEvento, { onchange:(e)=> snap.fechaEvento = e.target.value }), 'Admite fechas pasadas.'),
-        field('Cómo se detectó', selectCtl(DETECCIONES_APERTURA, snap.deteccion, { onchange:(e)=> snap.deteccion = e.target.value })),
-      ]));
-      body.appendChild(field('Descripción del problema *', textareaCtl({ rows:3, oninput:(e)=> snap.descripcion = e.target.value })));
-      body.appendChild(row('1fr 1fr', [
-        field('Responsable que recibe el caso *', selectTecnico(snap.responsable, { onchange:(e)=> snap.responsable = e.target.value })),
-        field('Estado de la solicitud SIGEM', selectCtl([
-          { value:'falta',    label:'Falta gestionar con servicio clínico (por defecto)' },
-          { value:'existe',   label:'Ya existe — tengo el folio' },
-          { value:'noAplica', label:'No aplica' },
-        ], snap.sigemEstado, { onchange:(e)=> { snap.sigemEstado = e.target.value; renderSigem(); } })),
-      ]));
-      const sigemRow = h('div');
-      body.appendChild(sigemRow);
-      function renderSigem() {
-        sigemRow.innerHTML = '';
-        if (snap.sigemEstado === 'existe') {
-          sigemRow.appendChild(field('Folio SIGEM *', inputCtl({ placeholder:'2026-12345', oninput:(e)=> snap.folioSigem = e.target.value })));
-        } else if (snap.sigemEstado === 'falta') {
-          sigemRow.appendChild(h('div.banner.warning', [ h('i.ti.ti-info-circle'), h('div.grow','Se creará un pendiente "Solicitar folio SIGEM al servicio clínico" con vencimiento 3 días hábiles. El ciclo arrancará igual con banner amarillo en la ficha.') ]));
-        }
-      }
-      renderSigem();
-    },
-    footer: (f, { close }) => {
-      f.appendChild(h('button.btn.ghost', { onclick: close }, 'Cancelar'));
-      f.appendChild(h('button.btn.primary', { onclick: () => {
-        try {
-          const fechaISO = isoFromDateInput(snap.fechaEvento);
-          if (!fechaISO) throw new Error('Fecha inválida.');
-          if (!snap.descripcion.trim()) throw new Error('Falta descripción.');
-          if (!snap.responsable.trim()) throw new Error('Indicá un responsable.');
-          if (snap.sigemEstado === 'existe' && !snap.folioSigem.trim()) throw new Error('Indicá el folio SIGEM o cambiá a "Falta gestionar".');
-          const { ciclo } = CICLO.crear(equipo.uuid, {
-            fechaEvento: fechaISO,
-            deteccion: snap.deteccion,
-            descripcion: snap.descripcion.trim(),
-            responsable: snap.responsable.trim(),
-            sigemEstado: snap.sigemEstado,
-            folioSigem: snap.folioSigem.trim(),
-            startEslabon: 'diagnostico',
-          });
-          UI.toast('Ciclo abierto. Equipo marcado No Operativo.', 'success');
-          close('save');
-          abrirCicloViewer(equipo, ciclo);
-        } catch (e) { bus.emit('error', e); }
-      }}, 'Abrir ciclo'));
-    },
-  });
-}
 
 function renderFichaTab(id, e) {
   const wrap = h('div');
@@ -5765,26 +6191,10 @@ function renderFichaTab(id, e) {
     }
     case 'ciclos': {
       const cs = (e.correctivos || []).slice().reverse();
-      if (!cs.length) { wrap.appendChild(emptyTabHint('No hay ciclos correctivos para este equipo.')); break; }
+      if (!cs.length) { wrap.appendChild(emptyTabHint('No hay ciclos correctivos para este equipo. Usá los botones del footer para crear una solicitud, envío, recepción o reparación.')); break; }
       cs.forEach(c => {
-        const card = h('div.card', { style:{ marginBottom: '10px', cursor:'pointer' }, onclick: () => { abrirCicloViewer(e, c); } }, [
-          h('div.card-h', [
-            h('h3', c.abierto ? 'Ciclo en curso' : (c.cancelado ? 'Ciclo cancelado' : 'Ciclo cerrado')),
-            h('span.sub', `Eslabón: ${ESLABONES_LABEL[c.eslabonActual] || c.eslabonActual || '—'}`),
-            c.enGarantia ? h('span.pill.purple', 'Garantía') : null,
-            c.abierto ? h('span.pill.warning', 'Abierto') : (c.cancelado ? h('span.pill.danger','Cancelado') : h('span.pill.success', 'Cerrado')),
-            h('button.btn.sm.ghost', { style:{marginLeft:'auto'}, onclick: (ev) => { ev.stopPropagation(); abrirCicloViewer(e, c); } }, [ h('i.ti.ti-chevron-right'), 'Abrir' ]),
-          ]),
-          h('div', { style:{ fontSize:'12.5px', color:'var(--ink-2)' } }, [
-            c.apertura?.fechaEvento ? `Aperturado el ${fmt.date(c.apertura.fechaEvento)}. ` :
-            c.apertura?.fecha       ? `Aperturado el ${fmt.date(c.apertura.fecha)}. ` :
-            c.solicitud?.fecha      ? `Solicitud del ${fmt.date(c.solicitud.fecha)}. ` : '',
-            c.apertura?.folioSigem ? `Folio SIGEM ${c.apertura.folioSigem}. ` :
-            c.solicitud?.folioSigem ? `Folio SIGEM ${c.solicitud.folioSigem}. ` : '',
-            c.ruta ? `Ruta: ${c.ruta.replace('_',' ')}. ` : '',
-            c.cerradoEn ? `Cierre: ${fmt.date(c.cerradoEn)}.` : '',
-          ]),
-        ]);
+        const card = h('div.card', { style:{ marginBottom: '12px' } });
+        card.appendChild(renderCicloEventos(e, c));
         wrap.appendChild(card);
       });
       break;
@@ -6081,40 +6491,128 @@ function renderAnio(container, meta, f) {
 }
 VIEWS.ciclos = {
   title: 'Ciclos correctivos',
-  render(root) {
-    root.appendChild(viewHeader({ title: 'Ciclos correctivos', desc: 'Ciclos abiertos y cerrados. La gestión completa por eslabón llega en It.3.' }));
-    const abiertos = EQ.ciclosAbiertos();
-    if (!abiertos.length) {
-      root.appendChild(emptyState({ icon:'ti-tools', title: 'Sin ciclos abiertos', desc:'Los ciclos se crean al registrar causales C2/C3 o desde la ficha del equipo (It.3).' }));
+  render(root, params={}) {
+    root.appendChild(viewHeader({
+      title: 'Ciclos correctivos',
+      desc: 'Vista global de ciclos abiertos y cerrados (últimos 60 días).',
+    }));
+
+    // Reunir ciclos
+    const ahora = Date.now();
+    const limite60 = ahora - 60 * 86400000;
+    const todos = [];
+    STATE.equipos.forEach(e => (e.correctivos || []).forEach(c => {
+      const cerrado = c.cerrado ? new Date(c.cerrado).getTime() : null;
+      if (c.abierto || (cerrado != null && cerrado >= limite60)) {
+        todos.push({ equipo: e, ciclo: c });
+      }
+    }));
+
+    if (!todos.length) {
+      root.appendChild(emptyState({
+        icon:'ti-tools', title:'Sin ciclos activos',
+        desc:'Los ciclos se crean desde la ficha del equipo con los botones + Solicitud / + Envío / + Recepción / + Reparación.',
+      }));
       return;
     }
+
+    // Filtros
+    const empresas = Array.from(new Set(STATE.equipos.flatMap(e => (e.correctivos||[]).flatMap(c => (c.envios||[]).map(en => en.empresaST))).filter(Boolean))).sort();
+    const responsables = Array.from(new Set(todos.flatMap(({ciclo}) => [
+      ciclo.solicitud?.responsable,
+      ...(ciclo.envios||[]).map(e => e.responsable),
+      ...(ciclo.recepciones||[]).map(r => r.responsable),
+      ciclo.reparacion?.responsable,
+    ]).filter(Boolean))).sort();
+
+    let filtros = Object.assign({ estado:'', empresa:'', responsable:'' }, params.filtros || {});
+    const filtBar = h('div', { style:{display:'flex', gap:'8px', alignItems:'center', flexWrap:'wrap', marginBottom:'12px'} }, [
+      h('span', { style:{fontSize:'12px', color:'var(--ink-3)'} }, 'Filtrar:'),
+      selectCtl([{ value:'', label:'Todos los estados' },
+        { value:'abiertos', label:'Solo abiertos' },
+        { value:'cerrados', label:'Solo cerrados' },
+      ], filtros.estado, { onchange:(e)=> { filtros.estado = e.target.value; render(); } }),
+      selectCtl([{ value:'', label:'Todas las empresas' }, ...empresas.map(em => ({ value:em, label:em }))],
+        filtros.empresa, { onchange:(e)=> { filtros.empresa = e.target.value; render(); } }),
+      selectCtl([{ value:'', label:'Todos los responsables' }, ...responsables.map(r => ({ value:r, label:r }))],
+        filtros.responsable, { onchange:(e)=> { filtros.responsable = e.target.value; render(); } }),
+    ]);
+    root.appendChild(filtBar);
+
     const wrap = h('div.table-wrap');
-    const tbl = h('table.dt');
-    tbl.innerHTML = `<thead><tr>
-      <th>Equipo</th><th>Servicio</th><th>Eslabón</th><th>Apertura</th><th>SIGEM</th><th>Días</th>
-    </tr></thead>`;
-    const tb = h('tbody');
-    abiertos
-      .sort((a,b) => new Date(a.ciclo.apertura?.fechaEvento || 0) - new Date(b.ciclo.apertura?.fechaEvento || 0))
-      .forEach(({equipo, ciclo}) => {
-        const fApert = ciclo.apertura?.fechaEvento || ciclo.solicitud?.fecha;
-        const dias = fmt.daysSince(fApert);
-        const sigem = ciclo.apertura?.folioSigem || ciclo.solicitud?.folioSigem;
-        const sigemEstado = ciclo.apertura?.sigemEstado;
-        tb.appendChild(h('tr', { onclick: () => abrirCicloViewer(equipo, ciclo) }, [
-          h('td', [ h('div', equipo.nombre), h('div', { style:{color:'var(--ink-3)', fontSize:'11.5px'} }, `${equipo.serie||''} · ${equipo.inventario||''}`) ]),
-          h('td.truncate', equipo.servicio || '—'),
-          h('td', h('span.pill', ESLABONES_LABEL[ciclo.eslabonActual] || ciclo.eslabonActual || '—')),
-          h('td.col-mono', fApert ? fmt.date(fApert) : '—'),
-          h('td', sigem ? h('span.pill', sigem) : (sigemEstado === 'falta' ? h('span.pill.warning','pendiente') : h('span.pill.muted','—'))),
-          h('td', dias != null ? h(`span.pill.${dias > 30 ? 'danger' : dias > 14 ? 'warning' : 'muted'}`, `${dias}d`) : '—'),
+    root.appendChild(wrap);
+
+    function render() {
+      wrap.innerHTML = '';
+      let lista = todos.slice();
+      if (filtros.estado === 'abiertos') lista = lista.filter(x => x.ciclo.abierto);
+      if (filtros.estado === 'cerrados') lista = lista.filter(x => !x.ciclo.abierto);
+      if (filtros.empresa) lista = lista.filter(x => (x.ciclo.envios||[]).some(en => en.empresaST === filtros.empresa));
+      if (filtros.responsable) lista = lista.filter(x => {
+        const all = [x.ciclo.solicitud?.responsable, ...(x.ciclo.envios||[]).map(e => e.responsable), ...(x.ciclo.recepciones||[]).map(r => r.responsable), x.ciclo.reparacion?.responsable].filter(Boolean);
+        return all.includes(filtros.responsable);
+      });
+
+      const tbl = h('table.dt');
+      tbl.innerHTML = `<thead><tr>
+        <th>Equipo</th><th>Estado</th><th>Solicitud</th><th>Último envío</th><th>Recepción</th><th>Reparación</th><th>Pendientes</th>
+      </tr></thead>`;
+      const tb = h('tbody');
+      lista.sort((a,b) => {
+        const fA = primerEventoCiclo(a.ciclo);
+        const fB = primerEventoCiclo(b.ciclo);
+        return new Date(fB) - new Date(fA);
+      });
+      lista.forEach(({ equipo, ciclo }) => {
+        const ultEnv = (ciclo.envios||[]).slice(-1)[0];
+        const ultRec = (ciclo.recepciones||[]).slice(-1)[0];
+        const diasEnST = ultEnv ? Math.floor((Date.now() - new Date(ultEnv.fechaEvento).getTime()) / 86400000) : null;
+        const diasRecep = ultRec ? Math.floor((Date.now() - new Date(ultRec.fechaEvento).getTime()) / 86400000) : null;
+        const fSol = ciclo.solicitud?.fechaEvento;
+        const pendsAbiertos = STATE.pendientes.filter(p => p.meta?.cicloUuid === ciclo.uuid && p.estado !== 'Cerrado').length;
+        const primer = primerEventoCiclo(ciclo);
+        const diasCiclo = primer ? Math.floor((Date.now() - new Date(primer).getTime()) / 86400000) : null;
+        tb.appendChild(h('tr', { onclick: () => openFicha(equipo.uuid) }, [
+          h('td', [
+            h('div', equipo.nombre || '—'),
+            h('div', { style:{color:'var(--ink-3)', fontSize:'11.5px'} }, `${equipo.inventario || ''} · ${ESTADO_LABEL[equipo.estado] || equipo.estado}`),
+          ]),
+          h('td', ciclo.abierto
+            ? h(`span.pill.${diasCiclo > 30 ? 'danger' : diasCiclo > 14 ? 'warning' : 'info'}`, `abierto · ${diasCiclo}d`)
+            : (ciclo.cancelado ? h('span.pill.danger','cancelado') : h('span.pill.success', 'cerrado'))),
+          h('td', fSol
+            ? h('div', [ h('div', { style:{fontSize:'12px'} }, ciclo.solicitud.folioSigem || '(sin folio)'), h('div', { style:{fontSize:'11px', color:'var(--ink-3)'} }, fmt.date(fSol)) ])
+            : '—'),
+          h('td', ultEnv
+            ? h('div', [ h('div', { style:{fontSize:'12px'} }, ultEnv.empresaST), h('div', { style:{fontSize:'11px', color:'var(--ink-3)'} }, `${fmt.date(ultEnv.fechaEvento)} · ${diasEnST}d`) ])
+            : '—'),
+          h('td', ultRec
+            ? h('div', [ h('div', { style:{fontSize:'12px'} }, fmt.date(ultRec.fechaEvento)), h('div', { style:{fontSize:'11px', color:'var(--ink-3)'} }, `${diasRecep}d`) ])
+            : '—'),
+          h('td', ciclo.reparacion
+            ? h('span.pill.success', fmt.date(ciclo.reparacion.fechaEvento))
+            : (ciclo.abierto ? h('span.pill.warning', `abierto hace ${diasCiclo}d`) : '—')),
+          h('td', pendsAbiertos ? h('span.pill.info', String(pendsAbiertos)) : '—'),
         ]));
       });
-    tbl.appendChild(tb);
-    wrap.appendChild(tbl);
-    root.appendChild(wrap);
+      tbl.appendChild(tb);
+      wrap.appendChild(h('div.table-meta', `${lista.length} ciclos`));
+      wrap.appendChild(tbl);
+    }
+    render();
   },
 };
+
+function primerEventoCiclo(c) {
+  const stamps = [
+    c.solicitud?.fechaEvento,
+    ...(c.envios||[]).map(x => x.fechaEvento),
+    ...(c.recepciones||[]).map(x => x.fechaEvento),
+    c.reparacion?.fechaEvento,
+  ].filter(Boolean);
+  if (!stamps.length) return null;
+  return stamps.sort()[0];
+}
 
 VIEWS.entregas = {
   title: 'Entregas',
@@ -6366,6 +6864,80 @@ const UI_PEND = {
   // Tracks which cards are expanded (Set of ids).
   expanded: new Set(),
 };
+
+// Snapshot del último filtrado aplicado en Inventario, usado por
+// `exportarInventarioFiltrado`. Volátil (no se persiste).
+let INV_LAST_FILTERED = null;
+let INV_LAST_FILTROS  = null;
+
+/**
+ * Exporta a Excel los equipos actualmente filtrados en Inventario.
+ * Hojas: Equipos (filas filtradas) · Resumen (conteos) · Filtros aplicados.
+ */
+async function exportarInventarioFiltrado() {
+  try {
+    await ensureXLSX();
+    const lista = INV_LAST_FILTERED || STATE.equipos.slice();
+    if (lista.length > 500) {
+      const ok = await UI.dialog({ title:'Exportar Inventario', message:`Vas a exportar ${lista.length} equipos. ¿Continuamos?`, confirmText:'Exportar' });
+      if (!ok) return;
+    }
+    const headers = ['ID','Servicio','Equipo','Familia','Carpeta','N° Inventario','Serie','Marca','Modelo','Año','Frecuencia','Estado','Días en estado','En garantía'];
+    const data = [headers];
+    lista.forEach(e => {
+      const d = diasEnEstadoActual(e);
+      data.push([
+        e.id || '', e.servicio || '', e.nombre || '', e.fam || '',
+        e.carpeta ?? '', e.inventario || '', e.serie || '',
+        e.marca || '', e.modelo || '', e.anio || '',
+        e.frecuencia || '', ESTADO_LABEL[e.estado] || e.estado || '',
+        d == null ? '' : Math.floor(d),
+        e.enGarantia ? 'Sí' : '',
+      ]);
+    });
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet(data);
+    ws['!cols'] = headers.map(h => ({ wch: h.length + 6 }));
+    XLSX.utils.book_append_sheet(wb, ws, 'Equipos');
+
+    // Hoja Resumen
+    const byEst = {};
+    const byServ = {};
+    const byFam = {};
+    lista.forEach(e => {
+      byEst[e.estado] = (byEst[e.estado]||0) + 1;
+      byServ[e.servicio || '(sin servicio)'] = (byServ[e.servicio || '(sin servicio)']||0) + 1;
+      byFam[e.fam || '(sin familia)'] = (byFam[e.fam || '(sin familia)']||0) + 1;
+    });
+    const resumen = [['Métrica','Valor'], ['Total exportado', lista.length]];
+    resumen.push(['','']);
+    resumen.push(['Por estado','']);
+    Object.entries(byEst).sort((a,b) => b[1]-a[1]).forEach(([k,v]) => resumen.push([ESTADO_LABEL[k]||k, v]));
+    resumen.push(['','']);
+    resumen.push(['Por servicio (top 20)','']);
+    Object.entries(byServ).sort((a,b) => b[1]-a[1]).slice(0,20).forEach(([k,v]) => resumen.push([k, v]));
+    resumen.push(['','']);
+    resumen.push(['Por familia (top 20)','']);
+    Object.entries(byFam).sort((a,b) => b[1]-a[1]).slice(0,20).forEach(([k,v]) => resumen.push([k, v]));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(resumen), 'Resumen');
+
+    // Hoja Filtros aplicados
+    const f = INV_LAST_FILTROS || {};
+    const filtros = [['Filtro','Valor']];
+    Object.entries(f).forEach(([k,v]) => {
+      if (v) filtros.push([k, String(v)]);
+    });
+    filtros.push(['exportadoEn', new Date().toISOString()]);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(filtros), 'Filtros aplicados');
+
+    const filtroPrincipal = f.estado || f.servicio || f.familia || 'todos';
+    const fecha = new Date().toISOString().slice(0,10);
+    XLSX.writeFile(wb, `Inventario_${filtroPrincipal}_${fecha}.xlsx`);
+    UI.toast(`Exportados ${lista.length} equipos.`, 'success');
+  } catch (e) { bus.emit('error', e); }
+}
+
+
 
 function pendFiltrosActivos() {
   const f = UI_PEND.filtros;
@@ -6751,7 +7323,7 @@ function renderPendienteExpandido(p, refresh) {
 }
 
 function abrirModalNuevoPendiente() {
-  let snap = { descripcion:'', asignado:'', equipoUuid:'', vence: dateInputValue(addBusinessDays(new Date(), 3)) };
+  let snap = { descripcion:'', asignado: usuarioActual() || '', equipoUuid:'', vence: dateInputValue(addBusinessDays(new Date(), 3)) };
   UI.modal({
     title: 'Nuevo pendiente',
     size: 'sm',
@@ -7444,6 +8016,16 @@ VIEWS.config = {
     }
     root.appendChild(cardIg);
 
+    // === R6 — Usuario actual del sistema ===
+    const cardUsr = h('div.card', { style:{marginBottom:'14px'} }, [
+      h('div.card-h', [ h('h3','Mi usuario'), h('span.sub','Pre-rellena formularios y filtra "mis pendientes"') ]),
+      h('div', { style:{display:'flex', alignItems:'center', gap:'10px'} }, [
+        h('div', { style:{flex:1, fontSize:'13px'} }, usuarioActual() ? `Identificado como: ${usuarioActual()}` : 'Sin identificar.'),
+        h('button.btn', { onclick: () => abrirModalIdentificarUsuario({ sub: 'Cambiar el usuario activo del sistema.' }) }, [ h('i.ti.ti-user-edit'), 'Cambiar usuario' ]),
+      ]),
+    ]);
+    root.appendChild(cardUsr);
+
     const cardRec = h('div.card', { style:{marginBottom:'14px'} }, [
       h('div.card-h', [ h('h3','Grabación de sesión'), h('span.sub','Captura clicks, cambios y submits con timestamps para soporte/diagnóstico') ]),
       h('p', { style:{ color:'var(--ink-3)', fontSize:'12px', margin:'0 0 10px 0' } },
@@ -7649,13 +8231,28 @@ function boot() {
     loadState();
     const migPend = migrarPendientesV33(STATE.pendientes);
     if (migPend) { persist('pendientes'); console.info('[boot] migrarPendientesV33: ' + migPend + ' campos normalizados'); }
+    const migC = migrarCiclosV34(STATE.equipos);
+    if (migC.descartadosAbiertos || migC.convertidos || migC.mpsLimpiados) {
+      persist('equipos');
+      const msg = [];
+      if (migC.descartadosAbiertos) msg.push(`${migC.descartadosAbiertos} ciclo${migC.descartadosAbiertos>1?'s':''} abierto${migC.descartadosAbiertos>1?'s':''} descartado${migC.descartadosAbiertos>1?'s':''} del modelo viejo`);
+      if (migC.convertidos) msg.push(`${migC.convertidos} ciclo${migC.convertidos>1?'s':''} cerrado${migC.convertidos>1?'s':''} convertido${migC.convertidos>1?'s':''}`);
+      if (migC.mpsLimpiados) msg.push(`${migC.mpsLimpiados} registro${migC.mpsLimpiados>1?'s':''} MP con referencia huérfana limpiada${migC.mpsLimpiados>1?'s':''}`);
+      console.info('[boot] migrarCiclosV34:', migC);
+      setTimeout(() => UI.toast('Migración v34 del ciclo correctivo: ' + msg.join(' · '), 'info', { duration: 9000 }), 800);
+    }
     renderNav();
     renderSessionChip();
     Theme.syncToggle();
     REC.updateChip();
     $('#themeToggle').addEventListener('click', () => Theme.toggle());
     $('#openCmdk').addEventListener('click', () => CMDK.open());
-    bus.on('state:change', () => renderSessionChip());
+    bus.on('state:change', (slice) => {
+      renderSessionChip();
+      if (!slice || slice === 'pendientes') {
+        try { actualizarBadgesPendientes(); } catch {}
+      }
+    });
 
     // Periodic chip update for REC events counter
     setInterval(() => { if (REC.isActive()) REC.updateChip(); }, 1500);
@@ -7663,11 +8260,27 @@ function boot() {
     $('#bootScreen').remove();
     $('#app').hidden = false;
 
-    Router.go(STATE.equipos.length ? 'inv' : 'dash');
+    Router.go(STATE.equipos.length ? 'dash' : 'dash');
 
     if (mig.migrated && mig.counts && (mig.counts.equipos || mig.counts.pendientes)) {
       UI.toast(`Migrados ${mig.counts.equipos} equipos · ${mig.counts.pendientes} pendientes desde el sistema anterior.`, 'success', { duration: 6500 });
     }
+
+    // ===== R6 boot UX =====
+    // 1) Identificación del usuario (primera carga ever)
+    setTimeout(() => {
+      if (!usuarioActual()) abrirModalIdentificarUsuario();
+      else {
+        // 2) Welcome modal del día (si todavía no se mostró hoy)
+        const hoy = new Date().toISOString().slice(0,10);
+        const ult = (() => { try { return localStorage.getItem('pmp.v3.ultimaApertura'); } catch { return null; } })();
+        if (ult !== hoy) abrirModalBienvenida();
+      }
+      // 3) Pendientes automáticos 30d
+      try { revisarEquiposVencidos(); } catch (e) { console.error(e); }
+      // 4) Refrescar badges del sidebar
+      try { actualizarBadgesPendientes(); } catch (e) { console.error(e); }
+    }, 600);
   } catch (e) {
     console.error(e);
     document.body.innerHTML = `<pre style="padding:24px;color:#b91c1c;font-family:monospace">Error de arranque:\n${(e&&e.stack)||e}</pre>`;
@@ -7691,6 +8304,11 @@ try {
     // R4
     ESTADOS_PENDIENTE, ESTADO_PENDIENTE_LABEL, migrarPendientesV33, UI_PEND,
     abrirModalNuevoPendiente, abrirModalEditarPendiente,
+    // R6
+    ESTADOS_NO_OPERATIVOS, migrarCiclosV34, tiempoEnEstado, diasEnEstadoActual,
+    abrirModalSolicitudTrabajo, abrirModalEnvioST, abrirModalRecepcion, abrirModalReparacion,
+    renderCicloEventos, usuarioActual, setUsuarioActual, revisarEquiposVencidos,
+    actualizarBadgesPendientes, exportarInventarioFiltrado,
   };
 } catch {}
 </script>

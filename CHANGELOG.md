@@ -1,5 +1,206 @@
 # Changelog
 
+## Fase 1 · Iteración R6 — Rediseño ciclo correctivo + UX operativa diaria
+
+Cambio estructural grande: el ciclo correctivo pasa de eslabones
+monolíticos a **eventos independientes relacionados** (solicitud +
+envíos[] + recepciones[] + reparación). Diagnostico / compra /
+garantía se eliminan del modelo. Garantía queda como flag informativo
+del equipo. Nuevo estado `Recepcionado`. Migración v34 al boot
+descarta ciclos abiertos del modelo viejo y convierte los cerrados.
+
+### Parte 1 — Ciclo correctivo
+
+**1.1 Estado `Recepcionado`** agregado a `ESTADOS` (orden: Operativo /
+NoOperativo / ServicioTecnico / Recepcionado / FueraDeServicio /
+DeBaja / Slot). Pill azul institucional (`info`). Helper
+`ESTADOS_NO_OPERATIVOS = ['NoOperativo','ServicioTecnico','Recepcionado']`.
+
+**1.2 Modelo de datos del ciclo**:
+
+```js
+Ciclo {
+  uuid, abierto, enGarantia,
+  solicitud: null | { fechaEvento, fechaRegistro, folioSigem, responsable, observaciones },
+  envios: [{ uuid, fechaEvento, numeroEnvio, empresaST, responsable, observaciones, recepcionUuid, cerrado }],
+  recepciones: [{ uuid, fechaEvento, guiaDespacho, responsable, observaciones, envioUuid }],
+  reparacion: null | { fechaEvento, fechaRegistro, responsable, observaciones },
+  creado, cerrado, tiempoTotalDias
+}
+```
+
+Ciclo abierto mientras `reparacion === null`. Reparación lo cierra,
+calcula `tiempoTotalDias` desde el primer evento.
+
+**1.3 Migración v34** (`migrarCiclosV34`):
+- Ciclos viejos abiertos: descartados con WARN.
+- Ciclos viejos cerrados: convertidos extrayendo apertura→solicitud,
+  envio singular→envios[], recepcion singular→recepciones[],
+  reparación. Datos de diagnostico/compra/garantia quedan en
+  `c.legacyExtra` para auditoría.
+- Registros MP con `correctivoUuid` huérfano: limpiados con
+  `observacionMigracion`.
+- Idempotente vía `c.__migradoV34`.
+
+**1.4 Cuatro botones nuevos en la ficha del equipo**:
+- `+ Solicitud` (`ti-file-text`) → `abrirModalSolicitudTrabajo`.
+  Pide folio SIGEM obligatorio, fecha, responsable (selectTecnico),
+  observaciones. Crea ciclo + pendiente automático "Avanzar ciclo
+  correctivo" con vencimiento 5 días hábiles. Equipo a NoOperativo.
+- `+ Envío ST` (`ti-truck-delivery`) → `abrirModalEnvioST`.
+  Lista solicitudes abiertas sin envío como radios + opción "iniciar
+  desde envío". Pide número de envío, empresaST (datalist con
+  empresas previas), responsable, observaciones. Equipo a
+  ServicioTecnico.
+- `+ Recepción` (`ti-package`) → `abrirModalRecepcion`.
+  Lista envíos sin recepción como radios + opción "iniciar desde
+  recepción". Pide fecha, guía de despacho (opcional), responsable.
+  Cierra envío vinculado. Equipo a Recepcionado. Crea pendiente
+  automático "Reparación pendiente" con vencimiento 5 días hábiles.
+- `+ Reparación` (`ti-tool`, primario) → `abrirModalReparacion`.
+  Lista ciclos abiertos ordenados por prioridad
+  (recepción→envío→solicitud), + opción "in-situ". Pide fecha,
+  responsable, observaciones. Cierra ciclo, equipo a Operativo,
+  cierra automáticamente pendientes con `meta.cicloUuid === c.uuid`.
+
+Todos los botones se deshabilitan si el equipo es Slot o DeBaja.
+
+**1.5 Visualización del ciclo como árbol** (`renderCicloEventos`):
+Reemplaza el viewer con stepper. Estructura: solicitud → árbol con
+ramas de envíos y sus recepciones vinculadas → reparación final.
+Cada nodo con ícono semántico (file-text, truck-delivery, package,
+tool). Junto al árbol, 4 KPI cards: tiempo total del ciclo, acumulado
+en cada estado no-operativo.
+
+**1.6 Tiempos en estado**:
+- `tiempoEnEstado(equipo, estado)` recorre eventos `ESTADO` ordenados
+  y suma tramos. Resultado en días con 1 decimal.
+- `diasEnEstadoActual(equipo)` resta `Date.now() - estadoDesde`.
+- Inventario: nueva columna "Días en estado" con pill de color
+  semáforo (verde <7d, amarillo 7-30d, rojo >30d).
+- Nuevo filtro "Tiempo en estado" en Inventario (>7d / >15d / >30d).
+
+**1.7 Alertas a 30 días** (`revisarEquiposVencidos`):
+Para cada equipo en estado no-operativo con `días > 30`, crea
+pendiente automático con `meta.tipoAlerta = '30d-{estado}'` y
+`meta.estadoDesde` para dedup. Idempotente: una segunda llamada con
+el mismo `estadoDesde` no duplica. Banner rojo en la ficha cuando
+aplica.
+
+**1.8 Causales C2/C3** que llegaban al viejo modal de vinculación con
+3 opciones ahora redirigen al nuevo flujo. La C3 / SI_NO_OP de R5
+arrancan el modal de solicitud pre-poblado.
+
+**1.9 Eliminado del modelo**: `apertura`, `diagnostico`, `compra`,
+`garantia`, `envio` singular, `recepcion` singular, `eslabonActual`,
+`ruta`, `ESLABONES_ORDEN`, `RUTAS_OPCIONES`, `ESLABON_DONE`. Las
+funciones viejas `saveEslabon`, `saveBorrador`, `vincularEnvio`,
+`eslabones`, `nextEslabon`, `abrirCicloViewer`, `renderStepper`,
+`renderEslabon*`, `abrirModalAperturaCiclo`,
+`abrirModalCompletarSigem` se eliminaron. `ESLABONES_LABEL` se
+conserva con un mapa mínimo para que `describeEvento` siga
+mostrando eventos viejos con label legible.
+
+### Parte 2 — UX operativa
+
+**2.2 Welcome modal diario**: en la primera apertura del día (detectada
+por `pmp.v3.ultimaApertura !== hoy`), aparece modal con saludo según
+hora del día, card de revisar maestro (con shortcut si ya se cargó
+hoy), 4 KPIs operativos clickeables (mis pendientes hoy / vencidos /
+equipos >30d crítico / ciclos abiertos), lista de recordatorios (sin
+asignar, recepciones >5d sin reparar, solicitudes >7d sin avance).
+Botón "Ver bienvenida" en el header del dashboard permite volver a
+abrirlo.
+
+**2.3 Identificación de usuario** (`abrirModalIdentificarUsuario`):
+en la primera carga ever, modal crítico (no se puede cerrar sin
+elegir). Pide elegir del `selectTecnico`. Guarda en
+`pmp.v3.usuario`. Tras identificarse, abre el welcome modal.
+Configuración tiene card "Mi usuario" con botón "Cambiar usuario".
+
+**2.4 Inventario operativo**:
+- Nueva columna "Días en estado" con semáforo.
+- Nuevo filtro "Tiempo en estado".
+- Botón "Exportar filtrado" en header
+  (`exportarInventarioFiltrado`): exporta solo las filas que cumplen
+  los filtros activos. Tres hojas: Equipos · Resumen (por estado /
+  servicio / familia) · Filtros aplicados (auditoría). Confirma si
+  >500 filas. Nombre: `Inventario_{filtroPrincipal}_{fecha}.xlsx`.
+
+**2.5 Vista global de ciclos** (`VIEWS.ciclos`): tabla con un row por
+ciclo abierto + cerrados últimos 60 días. Columnas: equipo / estado
+(abierto Nd con pill semáforo) / solicitud (folio + fecha) / último
+envío (empresa + días en ST) / última recepción (fecha + días) /
+reparación / pendientes abiertos del ciclo. Filtros: estado / empresa
+/ responsable.
+
+**2.7 Recordatorios persistentes**:
+- Badges en sidebar junto a "Pendientes": total abiertos (azul) +
+  vencidos asignados a mí (rojo). Se actualizan al cambiar
+  `STATE.pendientes` via `bus.on('state:change')`.
+- Banner amarillo persistente en el dashboard cuando hay
+  pendientes sin responsable.
+- Auto-asignación: `abrirModalNuevoPendiente` pre-rellena `asignado`
+  con `usuarioActual()`.
+
+**2.8 Dashboard rediseñado** como panel ejecutivo accionable:
+- Fila 1: 5 KPIs operativos clickeables — Operativos/Total con %,
+  No operativos (suma NoOp+ST+Rec), Ciclos correctivos, Mis
+  pendientes hoy, Pendientes vencidos.
+- Banner sin asignar (si aplica).
+- Fila 2: 3 cards "Atenciones críticas" con top-5 — equipos >30d en
+  estado crítico, ciclos sin avance >7d, MP pendientes del mes.
+- Fila 3: Distribución por estado (barras horizontales clickeables)
+  y top 10 familias con equipos no-operativos.
+- Fila 4: Resumen ejecutivo en prosa generado automáticamente, con
+  botón "Copiar texto" al portapapeles (para email/WhatsApp a
+  jefatura).
+
+### Lo que NO se entregó / Sugerencias para R7
+
+Por scope: implementadas las funcionalidades críticas. Quedaron como
+mejoras posibles para R7:
+
+- **Vista calendario en Pendientes** (B.6): el toggle Lista/Calendario
+  no se implementó. Los filtros R5 (estado/responsable/rango fechas)
+  cubren el caso principal de planificación.
+- **Multi-select en filtros del Inventario** (B.4.a) y **columnas
+  configurables** con persistencia: implementé `Tiempo en estado` y
+  el export filtrado pero no llegué a multi-select ni al pop-over de
+  columnas. Las preferencias persistidas siguen limitadas a "mostrar
+  slots".
+- **Vistas guardadas** (B.4.d): los presets clickeables no se
+  agregaron.
+- **Gráficos de pie/bar reales**: el dashboard usa barras simples,
+  no SVG.
+
+### Simulaciones R6
+
+| # | Flujo | Resultado |
+|---|-------|-----------|
+| Suite anterior (sims 1-15 + 4b/7 + R2-R5) | Adaptada y verde | OK · 9 archivos sims, 0 FAILs |
+| R6.1 | Estado Recepcionado | OK · agregarRecepcion lo aplica |
+| R6.2 | crearSolicitud crea ciclo + pendiente automático | OK |
+| R6.3 | Múltiples envíos en mismo ciclo | OK · `c.envios[]` con 2 entries |
+| R6.4 | Recepción vinculada cierra envío | OK · `env.recepcionUuid` + `env.cerrado` |
+| R6.5 | Reparación cierra ciclo + pendientes vinculados | OK · 2 pendientes cerrados automáticamente |
+| R6.6 | `tiempoEnEstado` / `diasEnEstadoActual` | OK · ~12d para estadoDesde=hace 12 días |
+| R6.7 | Pendiente automático 30d idempotente | OK · 1 creado · segunda llamada no duplica |
+| R6.8 | `migrarCiclosV34` idempotente | OK · ciclo cerrado viejo convertido, segunda llamada 0 cambios |
+| R6.9 | `renderCicloEventos` árbol | OK · solicitud + 2 envíos + 1 recepción + reparación |
+| R6.10 | `usuarioActual` + selectTecnico | OK · localStorage `pmp.v3.usuario` |
+| R6.11 | VIEWS.ciclos lista abiertos + cerrados | OK |
+| R6.12 | Dashboard con resumen ejecutivo + botón Copiar | OK · card y botón presentes |
+| R6.13 | Filtro tiempo en estado en Inventario | OK · 1 equipo con >30d |
+
+### Compatibilidad con sims previos
+
+Los sims que probaban el modelo viejo del ciclo (`CICLO.crear()` con
+`sigemEstado`, `CICLO.saveEslabon`) fueron adaptados al nuevo API.
+Los sims de la suite original (registro MP, vinculación C2/C3,
+pendientes R4, filtros R5, etc.) **no se modificaron** y todos
+pasan sin regresión.
+
 ## Fase 1 · Iteración R5 — Bug vinculación MP No Op + filtro fechas en Pendientes
 
 **Nota de contexto**: el prompt de R5 asumía que se trabajaba sobre R3,
